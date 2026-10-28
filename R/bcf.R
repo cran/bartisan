@@ -1,0 +1,564 @@
+#' Bayesian causal forests
+#'
+#' @description
+#' Fits a varying-coefficient model set up for estimating a treatment effect: a
+#' control function for the outcome under no treatment and a separate forest for
+#' the effect, with the prior on the effect regularized more heavily than the
+#' prior on the control function. This is Hahn, Murray and Carvalho (2020) for a
+#' binary treatment and Woody, Carvalho, Hahn and Murray (2020) for a continuous
+#' one.
+#'
+#' @inheritParams bartisan
+#' @param formula a model formula. The right-hand side lists the covariates; the
+#'   treatment is named in `treat` rather than here, and is removed from the
+#'   covariates if it appears among them.
+#' @param treat a one-sided formula naming the treatment, as in `~ z`. The
+#'   treatment may be binary, categorical, or continuous, and which it is decides
+#'   what the propensity score is and how it is modeled; see Details.
+#' @param moderators a one-sided formula naming the covariates the treatment
+#'   effect may vary with, in which `.` stands for the covariates in `formula`,
+#'   so that `~ . - x` lets it vary with every covariate but `x`. Default is
+#'   `NULL` to let the effect vary with every covariate.
+#' @param propensity what to do about the propensity score, given as
+#'   either a logical value, a numeric vector or matrix, or a one-sided formula.
+#'   Default is `TRUE` to fit a model for it and add the fitted values to the
+#'   control function. `FALSE` fits nothing, a numeric vector or matrix is used
+#'   as given, and a one-sided formula fits it with the predictors that formula
+#'   names, in which `.` stands for the covariates in `formula` rather than for
+#'   every column of `data`. For a continuous treatment the fitted values are
+#'   the treatment's conditional mean given the covariates; see Details.
+#' @param propensity_args a list of arguments for the propensity model:
+#'   [bartisan_control()] settings, and `family` to replace the family chosen
+#'   from the treatment's type (see Details). Default is `list()` to leave every
+#'   setting at its own default.
+#' @param ... passed to [bartisan()], including [bartisan_control()] settings.
+#'
+#' @returns
+#' A `<bcf_fit>` object, which is the `<bartisan_fit>` [bartisan()] returns with
+#' a class in front of it and the treatment's coefficient forest named for the
+#' treatment. Everything that works on a `<bartisan_fit>` works here unchanged;
+#' the class exists so that methods needing a named treatment have something to
+#' dispatch on. For a binary or categorical treatment, [estimate_effect()] can be
+#' used on the output to return interpretable marginal and conditional effects;
+#' for a continuous treatment, see [`bartisan-marginaleffects`]. [coef()] gives
+#' the conditional effect on the link scale for each observation.
+#'
+#' @details
+#' ## The Model
+#'
+#' `bcf()` writes several settings into a [bartisan()] call, all of which can
+#' be written out there directly. The treatment gets a [vc()] term, so the effect
+#' is a forest of its own with its own prior rather than whatever difference a
+#' single forest with the treatment among its predictors happens to produce. The
+#' propensity score goes in the control function and not in the effect forest,
+#' so that the control function absorbs the selection while the effect stays
+#' free of it. The effect forest gets fewer trees than the control function,
+#' since patterns of effect heterogeneity are usually simpler than prognostic
+#' surfaces. A binary treatment has its coding drawn rather than fixed, which is
+#' `center = "estimate"` in [vc()] and makes the answer the same whichever level
+#' was written as 1; a treatment with more levels keeps the symmetric per-level
+#' coding. The `sparsity` argument keeps its default of `FALSE` for both
+#' forests.
+#'
+#' The propensity score that enters the control function is the posterior mean
+#' of a separate model for the treatment, fit before the outcome model and then
+#' held fixed. Its uncertainty is therefore not carried into the interval for the
+#' effect, and the outcome has no say in the score, as it would in a joint model
+#' of the two. See `vignette("causal")` for more on this choice. Including the
+#' score at all matters because, with flexible priors on the outcome that are
+#' independent of the model for the treatment, the implied prior on the amount of
+#' confounding bias concentrates near zero (Linero, 2024).
+#'
+#' ## Setting `sparsity`
+#'
+#' The default splitting prior weights the predictors equally and cannot drop
+#' one. That is the right setting when a treatment is one predictor among many
+#' in a single forest, since a variable-selection prior can drop it from the
+#' forest entirely and put a point mass at exactly zero in the posterior of a
+#' contrast on it. Here the treatment is the coefficient rather than a predictor
+#' the forest splits on, so no splitting proportion can drop it, and the
+#' sparsity prior can be turned on without that risk. What it selects among on
+#' the effect forest is the moderators, and dropping all of them leaves an
+#' effect that does not vary rather than one that is zero, which is the
+#' shrinkage a heterogeneity model wants.
+#'
+#' Setting `sparsity = c(FALSE, TRUE)`
+#' leaves every predictor in the control function and asks only the effect forest
+#' to select among them, which is worth considering when there are many candidate
+#' moderators and a few of them are expected to matter. It is not the default
+#' because it costs accuracy when the effect does not vary: with nothing real
+#' to select, the prior concentrates the effect forest's splits on one or two
+#' of the nuisance moderators and produces heterogeneity that is not there,
+#' where the uniform prior spreads them thinly and averages it away. In
+#' simulations with twenty candidate moderators, turning it on lowered the
+#' error of the conditional effect by about 14% when two moderators were real
+#' and raised it by about 18% when none was, and left the average effect
+#' unchanged either way.
+#'
+#' ## Setting `treat`
+#'
+#' The treatment decides what the propensity score is and, by default, the
+#' family of the model that estimates it. A different family can be named with
+#' `propensity_args = list(family = ...)`.
+#'
+#' | treatment | propensity score | model |
+#' | --- | --- | --- |
+#' | binary | one column, the probability of treatment | [binomial()] |
+#' | `K` categories | the whole vector of assignment probabilities | [multinomial()] |
+#' | continuous | the conditional mean of the treatment | [gaussian()] |
+#'
+#' For a treatment with more than two categories the balancing score is the
+#' whole vector of assignment probabilities rather than any one of them, so all
+#' of them go into the control function. They sum to one and are therefore
+#' collinear, which costs a tree ensemble nothing.
+#'
+#' ## Continuous Treatments
+#'
+#' For a continuous treatment, the score added to the control function is the
+#' treatment's conditional mean given the covariates, fit with a Gaussian model.
+#' The balancing score proper would be the conditional density of the treatment
+#' at the observed dose, but the purpose of the score here is to let the control
+#' function absorb the confounding, and Linero (2024) shows for linear models
+#' that it is the conditional mean of the treatment whose absence leaves the
+#' prior on the confounding bias concentrated near zero. A score supplied as a
+#' number is used as given.
+#'
+#' The default family is [gaussian()] rather than [dpm()], which [bartisan()]
+#' would choose for a numeric response. Only the ordering of the fitted means
+#' matters to the trees that use them, and in simulations [dpm()] ordered them
+#' slightly better when the treatment's errors were heavy-tailed or skewed but
+#' far worse when the treatment had a point mass at zero, which its error
+#' mixture absorbs. For a treatment with heavy tails,
+#' `propensity_args = list(family = dpm())` may do better, and any family whose
+#' fitted values are the conditional mean can be named the same way.
+#'
+#' A continuous treatment also carries an assumption. This fits
+#' `f0(x) + z * f1(x)`, a dose response that is linear in the dose with a slope
+#' that varies with the covariates, which for a binary treatment is no
+#' assumption at all and for a continuous one is a real one. Where the dose
+#' response itself might be curved, either put the treatment in as an ordinary
+#' predictor or give `f1` the treatment among its moderators by writing the term
+#' as `vc(z, ~ z + ...)` in [bartisan()] directly, which lets the effect vary
+#' across the dose; see [vc()].
+#'
+#' ## Predicting for New Data
+#'
+#' The propensity score is a predictor of the control function and one the
+#' caller never named, so a `newdata` data frame taken from their own frame does not carry
+#' it. `predict()` rebuilds it from the model the fit kept, which makes
+#' that work. Supplying `propensity` as a number rather than fitting it removes
+#' the reconstruction, and the data given as `newdata` then has to carry the
+#' column itself.
+#'
+#' @seealso [estimate_effect()] for the average or conditional effect;
+#'   [bartisan()] and [vc()] for the general interface this is written in terms
+#'   of; `vignette("varying")` for the varying-coefficient model this is a case
+#'   of and what it writes into the call; and `vignette("causal")` for the
+#'   assumptions under which the effect is causal.
+#'
+#' @references
+#' Hahn, P. R., Murray, J. S., & Carvalho, C. M. (2020). Bayesian regression tree
+#' models for causal inference: regularization, confounding, and heterogeneous
+#' effects. *Bayesian Analysis*, 15(3), 965--1056. \doi{10.1214/19-BA1195}
+#'
+#' Linero, A. R. (2024). In nonparametric and high-dimensional models, Bayesian
+#' ignorability is an informative prior. *Journal of the American Statistical
+#' Association*, 119(548), 2785--2798. \doi{10.1080/01621459.2023.2278202}
+#'
+#' Woody, S., Carvalho, C. M., Hahn, P. R., & Murray, J. S. (2020). Estimating
+#' heterogeneous effects of continuous exposures using Bayesian tree ensembles.
+#' \doi{10.48550/arXiv.2007.09845}
+#'
+#' @examples
+#' data("rhc")
+#'
+#' set.seed(123)
+#'
+#' # The effect of right heart catheterization on death,
+#' # free to vary with every covariate, with the propensity
+#' # score entering the control function alone
+#' model <- death ~ age + sex + race + edu + aps + meanbp +
+#'   resp + hema + pafi + paco2 + crea + surv2m + card
+#'
+#' # Note: we use small sampler settings that would not be
+#' # appropriate for analysis; this is just for the
+#' # examples
+#' fit <- bcf(model, treat = ~ rhc, data = rhc,
+#'            family = binomial(), num_trees = c(10, 5),
+#'            num_burn = 50, num_draws = 50,
+#'            propensity_args = list(num_trees = 10,
+#'                                   num_burn = 50,
+#'                                   num_draws = 50))
+#'
+#' # One conditional effect per patient: the effect forest
+#' # evaluated at each observation
+#' head(coef(fit))
+#'
+#' # The average effect over the sample, on the response
+#' # scale, which for a binomial fit makes it a risk
+#' # difference rather than a log odds ratio
+#' estimate_effect(fit)
+#'
+#' # Or the whole picture at once
+#' summary(fit)
+#'
+#' @export
+bcf <- function(formula, treat, data, family = NULL, moderators = NULL,
+                propensity = TRUE, propensity_args = list(), ...) {
+
+  cl <- match.call()
+  values <- call_values(cl, environment())
+
+  arg::arg_formula(formula, one_sided = FALSE)
+  arg::arg_formula(treat, one_sided = TRUE)
+
+  name <- get_varnames(treat)
+
+  if (length(name) != 1L) {
+    arg::err("{.arg treat} must name exactly one variable, as in
+              {.code ~ z}")
+  }
+
+  if (!name %in% names(data)) {
+    arg::err("{.arg data} has no column {.val {name}}")
+  }
+
+  arg::when_not_null(moderators,
+                     arg::arg_formula(one_sided = TRUE))
+
+  # The treatment is not one of the covariates. Removing it rather than
+  # complaining is the friendly reading of `y ~ .`, which is how most callers
+  # will write the covariates.
+  covariates <- setdiff(attr(stats::terms(formula, data = data), "term.labels"), name)
+
+  if (is_null(covariates)) {
+    arg::err("{.arg formula} must name at least one covariate besides the
+              treatment")
+  }
+
+  # One call, one bar. `bcf()` fits the outcome model and, by default, a
+  # propensity model before it, and each of those `bartisan()` calls would
+  # otherwise build a progressor of its own: the caller asked for one fit and
+  # would watch two bars, the first of which fills long before the call is
+  # halfway done. Claiming the bar here sizes it for both models together and
+  # leaves both inner fits reporting into it. The claim also covers the retry
+  # below, which fits the outcome model a second time when a drawn coding turns
+  # out not to apply.
+  fits <- list(progress_spec(list(...)))
+
+  if (!isFALSE(propensity) && !is_null(propensity) &&
+      !is.numeric(propensity) && !is.matrix(propensity)) {
+    fits <- c(fits, list(progress_spec(propensity_args[names(propensity_args) != "family"])))
+  }
+
+  claimed <- the$claimed_progress
+  on.exit(the$claimed_progress <- claimed, add = TRUE, after = FALSE)
+  the$claimed_progress <- shared_reporter(fits)
+
+  scored <- bcf_propensity(propensity, name, covariates, data, propensity_args)
+  score <- scored[["score"]]
+
+  if (!is_null(score)) {
+    data <- cbind(data, score)
+    covariates <- c(covariates, colnames(score))
+  }
+
+  # The propensity score reaches the control function and not the effect forest,
+  # which is the whole point of estimating it: it lets the control function
+  # absorb the selection without letting the effect vary with it.
+  moderator_terms <- {
+    if (is_null(moderators))
+      setdiff(covariates, colnames(score))
+    else
+      covariate_terms(moderators, setdiff(covariates, colnames(score)))
+  }
+
+  # A binary treatment gets its coding drawn rather than fixed, which is what
+  # Hahn, Murray and Carvalho (2020, section 5.3) recommend and what their own
+  # software does. At two levels it restricts nothing -- the identified content is
+  # one function either way -- and it costs nothing in recovery: on the
+  # simulation in `_dev/coding-comparison.R` the effect's root mean squared error
+  # is 0.2014 against 0.1991 for a fixed zero, a paired difference of 0.0023 with
+  # a standard error of 0.0140. What it buys is that the answer stops depending
+  # on which level was written as 1. Coding the same treatment both ways and
+  # adding the two effects, which is zero if the coding does not matter, gives
+  # 0.0045 under a drawn coding against 0.0125 under a fixed zero, and on weak
+  # data (n = 150, effect 0.2) 0.0389 against 0.0830.
+  #
+  # Above two levels it stops being free -- every contrast is then one shared
+  # function times a scalar -- so a categorical treatment keeps the symmetric
+  # per-level coding. Measured on a truth where that restriction is false, the
+  # drawn coding's error is 0.696 against 0.242.
+  kind <- treatment_kind(data[[name]])
+  adaptive <- identical(kind, "binary")
+
+  dots <- list(...)
+
+  # Whether the caller chose a tree count, in either of the two spellings
+  # `bartisan()` accepts. Reading only `...` meant that
+  # `bcf(control = bartisan_control(num_trees = 7))` was overridden by the
+  # asymmetric default below without saying so, where `bcf(num_trees = 7)` was
+  # honored and `bartisan()` documents the two as equivalent.
+  supplied_trees <- "num_trees" %in% c(names(dots), names(attr(dots[["control"]], "supplied")))
+
+  # Both the formula and the default tree count follow the coding: a drawn coding
+  # is one effect forest whatever the number of levels, where the symmetric one
+  # is a forest per level.
+  #
+  # Fewer trees for the effect than for the control function, since patterns of
+  # effect heterogeneity are usually simpler than prognostic surfaces, and no
+  # variable-selection prior, since the estimand is a contrast on the treatment.
+  fit_with <- function(drawn) {
+    coding <- if (drawn) ', center = "estimate"' else ""
+
+    outcome <- stats::reformulate(
+      c(covariates,
+        sprintf("vc(%s, ~ %s%s)", name,
+                paste(moderator_terms, collapse = " + "), coding)),
+      response = formula[[2L]])
+    environment(outcome) <- environment(formula)
+
+    if (!supplied_trees) {
+      z <- data[[name]]
+      effects <- {
+        if (!drawn && (is.factor(z) || is.character(z))) {
+          length(levels(as.factor(z)))
+        }
+        else 1L
+      }
+
+      dots[["num_trees"]] <- c(50L, rep.int(25L, effects))
+    }
+
+    do.call(bartisan,
+            c(list(formula = outcome, data = data, family = family), dots))
+  }
+
+  # A drawn coding needs a leaf target that is quadratic in the predictor, which
+  # not every family has -- a cloglog binomial, a Poisson, a negative binomial
+  # under soft rules, a Tweedie. The coding is this wrapper's choice rather than
+  # the caller's, so where it does not apply the fixed default is the right
+  # answer; refusing would turn an internal choice into a model the caller
+  # cannot fit.
+  #
+  # The attempt is made and caught rather than predicted, because whether the
+  # target is quadratic is settled by the family that reaches the sampler and
+  # augmentation can make a non-quadratic one quadratic; that choice belongs to
+  # the engine. What has to be contained is the noise around the refusal. It is
+  # raised inside the engine, so it reaches here through `run_chains()`, and
+  # with more than one chain *future.apply* announces the failing chunk with an
+  # immediate warning of its own -- "Caught
+  # Rcpp::exception. Canceling all iterations ..." -- before re-raising. Nothing
+  # is wrong when that happens: the attempt was this function's own initiative
+  # and it is about to be handled. So the trial's warnings are held and only
+  # passed on if the trial is what the caller ended up with.
+  if (adaptive) {
+    held <- list()
+    refused <- FALSE
+
+    # The handlers of `try_fetch()` run before the trial unwinds, so the refusal
+    # is only recorded there and the fixed coding is fit once it has returned.
+    # Fit inside the handler and the trial's `run_chains()` has not yet restored
+    # the session's random number stream, so with more than one chain the
+    # fallback takes its seeds from the trial's stream and its draws change.
+    out <- rlang::try_fetch(
+      fit_with(TRUE),
+      warning = function(w) {
+        held[[length(held) + 1L]] <<- w
+        invokeRestart("muffleWarning")
+      },
+      error = function(e) {
+        if (!grepl("leaf target is\\s+quadratic", conditionMessage(e))) {
+          stop(e)
+        }
+
+        refused <<- TRUE
+        NULL
+      })
+
+    if (refused) {
+      held <- list()
+      out <- fit_with(FALSE)
+    }
+
+    # Replayed out here rather than inside the handler's reach, which would
+    # catch and swallow them a second time. A caller therefore sees a
+    # successful trial's warnings after the fit rather than during it.
+    for (w in held) warning(w)
+  }
+  else {
+    out <- fit_with(FALSE)
+  }
+
+  # `bartisan()` is reached through `do.call()`, so the call it recorded is the
+  # anonymous function it was handed rather than anything a reader would
+  # recognize. What `print()` should show is the call the caller made.
+  out[["call"]] <- cl
+  out[["call_values"]] <- values
+
+  # The propensity model is kept so that `predict()` on data the caller has can
+  # rebuild the score. Without it the fit depends on a column the caller's data
+  # does not have, and every prediction on new data fails on a missing variable
+  # whose name they never chose.
+  out[["bcf"]] <- list(treatment = name,
+                       propensity = score,
+                       model = scored[["model"]],
+                       moderators = moderator_terms)
+
+  # Prepended rather than replacing, so that everything registered on
+  # `<bartisan_fit>` still dispatches: `predict()`, `pp_check()`, the
+  # \pkg{marginaleffects} methods, and the `arg::arg_is()` guards, none of which
+  # need to know a treatment was named. What the class buys is a place to hang
+  # the methods that only make sense when one was: a causal estimand has an
+  # estimand to choose and a scale to be careful about, and neither question
+  # exists for a fit without a treatment.
+  class(out) <- c("bcf_fit", class(out))
+
+  out
+}
+
+# The propensity columns for new data, from the model the fit kept. `NULL` when
+# there is nothing to add, either because no score was used or because the data
+# already carries it.
+bcf_newdata_score <- function(object, newdata) {
+  spec <- object[["bcf"]]
+
+  if (is_null(spec) || is_null(spec[["propensity"]])) {
+    return(NULL)
+  }
+
+  wanted <- colnames(spec[["propensity"]])
+
+  if (all(wanted %in% names(newdata))) {
+    return(NULL)
+  }
+
+  if (is_null(spec[["model"]])) {
+    arg::err(c("{.arg newdata} is missing {length(wanted)} column{?s} this fit
+                uses as a predictor: {.val {wanted}}",
+               i = "The propensity score was supplied rather than fitted, so it
+                  cannot be rebuilt. Add the same column to {.arg newdata}."))
+  }
+
+  stats::fitted(spec[["model"]], newdata = newdata) |>
+    as.matrix() |>
+    setColnames(wanted)
+}
+
+# The terms of a one-sided formula naming covariates, with `.` standing for
+# `dot`, the covariates of the outcome model, as it does in a formula that
+# updates another. Expanded against `data` instead, as `terms()` would expand it,
+# `.` is every column, the outcome and the treatment among them, and for the
+# moderators the propensity score too: `propensity = ~ .` regressed the
+# treatment on the outcome.
+covariate_terms <- function(f, dot) {
+  if ("." %in% all.vars(f)) {
+    f <- stats::update(stats::reformulate(dot), f)
+  }
+
+  attr(stats::terms(f), "term.labels")
+}
+
+# The propensity score a fit was given as numbers, one row per row of its data,
+# or `NULL` for a fit that fitted its score or used none.
+bcf_supplied_score <- function(object) {
+  spec <- object[["bcf"]]
+
+  if (is_null(spec) || is_null(spec[["propensity"]]) ||
+      !is_null(spec[["model"]])) {
+    return(NULL)
+  }
+
+  spec[["propensity"]]
+}
+
+# The propensity score, or nothing. The model follows the treatment's type,
+# because what the score *is* follows the treatment's type.
+bcf_propensity <- function(propensity, name, covariates, data, args) {
+  # Checked as one alternation rather than in the branches below, which read the
+  # value rather than validating it: anything that is none of these used to fall
+  # through to the last branch and be fitted with the outcome's covariates, so a
+  # misspelled argument silently got the default behaviour.
+  arg::when_not_null(propensity,
+                     arg::arg_or(arg::arg_flag,
+                                 arg::arg_numeric,
+                                 arg::arg_formula(one_sided = TRUE)))
+
+  if (isFALSE(propensity) || is_null(propensity)) {
+    return(list(score = NULL, model = NULL))
+  }
+
+  z <- data[[name]]
+  kind <- treatment_kind(z)
+
+  if (is.numeric(propensity) || is.matrix(propensity)) {
+    score <- as.matrix(propensity)
+
+    if (nrow(score) != nrow(data)) {
+      arg::err("{.arg propensity} must have one row per observation")
+    }
+
+    colnames(score) <- bcf_score_names(ncol(score))
+    return(list(score = score, model = NULL))
+  }
+
+  terms <- {
+    if (rlang::is_formula(propensity))
+      covariate_terms(propensity, covariates)
+    else
+      covariates
+  }
+
+  model <- stats::reformulate(terms, response = as.symbol(name))
+
+  # A continuous treatment's score is its conditional mean, a regression, rather
+  # than the conditional density at the observed dose that would be its
+  # balancing score. The mean is what the control function needs: it is the
+  # covariate whose absence leaves the prior on the confounding bias concentrated
+  # near zero (Linero 2024), which is the reason a score is added at all.
+  #
+  # gaussian() rather than dpm(), which is what bartisan() would pick for a
+  # numeric response. On _dev/propensity-family.R, dpm() ordered E[A | X] a
+  # little better under heavy-tailed or skewed errors (Spearman .975 against
+  # .964, and .986 against .961) but far worse for a treatment with a point
+  # mass at zero (.505 against .902), whose zeros its mixture absorbs; a
+  # misfitted default is the worse failure. `family` in `args` overrides it.
+  fit_family <- args[["family"]] %or% switch(kind,
+                                             binary = stats::binomial(),
+                                             categorical = multinomial(),
+                                             continuous = stats::gaussian())
+  args[["family"]] <- NULL
+
+  fit <- do.call(bartisan,
+                 c(list(formula = model, data = data, family = fit_family),
+                   args))
+
+  score <- stats::fitted(fit) |>
+    as.matrix()
+
+  # Not folded into the pipe above: the names depend on the object being
+  # assigned, so `setColnames()` would force `ncol(score)` before `score`
+  # exists. Same form as the supplied-score branch above.
+  colnames(score) <- bcf_score_names(ncol(score))
+
+  list(score = score, model = fit)
+}
+
+treatment_kind <- function(z) {
+  if (is.factor(z) || is.character(z)) {
+    return(if (length(unique(stats::na.omit(z))) == 2L) "binary" else "categorical")
+  }
+
+  values <- unique(stats::na.omit(z))
+
+  if (length(values) == 2L && all(values %in% c(0, 1))) {
+    return("binary")
+  }
+
+  "continuous"
+}
+
+bcf_score_names <- function(k) {
+  if (k == 1L) ".propensity"
+  else sprintf(".propensity%d", seq_len(k))
+}

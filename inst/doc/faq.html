@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<meta name="author" content="Noah Greifer" />
+
+<meta name="date" content="2026-10-18" />
+
+<title>Frequently Asked Questions</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+<style type="text/css">
+
+div.csl-bib-body { }
+div.csl-entry {
+clear: both;
+}
+.hanging div.csl-entry {
+margin-left:2em;
+text-indent:-2em;
+}
+div.csl-left-margin {
+min-width:2em;
+float:left;
+}
+div.csl-right-inline {
+margin-left:2em;
+padding-left:1em;
+}
+div.csl-indent {
+margin-left: 2em;
+}
+</style>
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Frequently Asked Questions</h1>
+<h4 class="author">Noah Greifer</h4>
+<h4 class="date">2026-10-18</h4>
+
+
+<div id="TOC">
+<ul>
+<li><a href="#what-is-bart" id="toc-what-is-bart">What is BART?</a></li>
+<li><a href="#howwhen-should-i-use-bart" id="toc-howwhen-should-i-use-bart">How/When should I use BART?</a></li>
+<li><a href="#how-can-a-machine-learning-method-be-bayesian" id="toc-how-can-a-machine-learning-method-be-bayesian">How can a machine
+learning method be Bayesian?</a></li>
+<li><a href="#how-can-a-bayesian-method-be-machine-learning" id="toc-how-can-a-bayesian-method-be-machine-learning">How can a
+Bayesian method be machine learning?</a></li>
+<li><a href="#how-can-bart-be-used-for-inference" id="toc-how-can-bart-be-used-for-inference">How can BART be used for
+inference?</a></li>
+<li><a href="#how-do-i-get-estimates-out-of-the-model" id="toc-how-do-i-get-estimates-out-of-the-model">How do I get estimates
+out of the model?</a></li>
+<li><a href="#what-if-i-have-missing-data" id="toc-what-if-i-have-missing-data">What if I have missing
+data?</a></li>
+<li><a href="#can-i-supply-my-own-likelihood" id="toc-can-i-supply-my-own-likelihood">Can I supply my own
+likelihood?</a></li>
+<li><a href="#why-is-my-model-slow-and-what-should-i-change-first" id="toc-why-is-my-model-slow-and-what-should-i-change-first">Why is my
+model slow, and what should I change first?</a></li>
+<li><a href="#what-if-im-a-frequentist" id="toc-what-if-im-a-frequentist">What if I’m a frequentist?</a></li>
+<li><a href="#is-bart-good" id="toc-is-bart-good">Is BART good?</a></li>
+<li><a href="#how-can-bart-be-used-for-causal-inference" id="toc-how-can-bart-be-used-for-causal-inference">How can BART be used
+for causal inference?</a></li>
+<li><a href="#what-are-bayesian-causal-forests" id="toc-what-are-bayesian-causal-forests">What are Bayesian Causal
+Forests?</a></li>
+<li><a href="#how-do-i-get-a-treatment-effect" id="toc-how-do-i-get-a-treatment-effect">How do I get a treatment
+effect?</a></li>
+<li><a href="#what-papers-should-i-read-to-better-understand-bart" id="toc-what-papers-should-i-read-to-better-understand-bart">What papers
+should I read to better understand BART?</a></li>
+<li><a href="#what-does-the-name-bartisan-mean" id="toc-what-does-the-name-bartisan-mean">What does the name “bartisan”
+mean?</a></li>
+<li><a href="#how-does-bartisan-differ-from-other-bart-implementations-in-r" id="toc-how-does-bartisan-differ-from-other-bart-implementations-in-r">How
+does <em>bartisan</em> differ from other BART implementations in
+R?</a></li>
+<li><a href="#what-model-family-should-i-use" id="toc-what-model-family-should-i-use">What model family should I
+use?</a></li>
+<li><a href="#how-should-i-select-the-values-of-the-hyperparameters" id="toc-how-should-i-select-the-values-of-the-hyperparameters">How
+should I select the values of the hyperparameters?</a></li>
+<li><a href="#how-should-i-choose-how-many-chains-and-burn-in-and-posterior-draws" id="toc-how-should-i-choose-how-many-chains-and-burn-in-and-posterior-draws">How
+should I choose how many chains and burn-in and posterior
+draws?</a></li>
+<li><a href="#references" id="toc-references">References</a></li>
+</ul>
+</div>
+
+<p>These are some questions that come up most often about BART and
+<em>bartisan</em>. Each answer stands on its own, so they can be read in
+any order, and each one points at the vignette or help page that works
+its topic through in full.</p>
+<div id="what-is-bart" class="section level3">
+<h3>What is BART?</h3>
+<p>BART stands for “Bayesian Additive Regression Trees”. It’s a Bayesian
+machine learning method used to model the relationship between
+predictors and outcomes. It’s similar to GBM/xgboost, extraTrees, and
+random forests in that the fit is built out of many small trees rather
+than one big one. BART sums their contributions, as boosting does, where
+random forests and extraTrees average theirs. This lets it approximate
+complex and nonlinear functions without you needing to specify their
+form.</p>
+</div>
+<div id="howwhen-should-i-use-bart" class="section level3">
+<h3>How/When should I use BART?</h3>
+<p>Use BART exactly the same way you would use any regression method or
+any machine learning method.</p>
+</div>
+<div id="how-can-a-machine-learning-method-be-bayesian" class="section level3">
+<h3>How can a machine learning method be Bayesian?</h3>
+<p>Each parameter of the model, including which variables are used to
+split the trees, how deep each tree is, the predicted value in the leaf,
+the residual variance, etc., is assigned a prior, and through running
+the model on the data, each model output gains a posterior. In
+traditional machine learning models, these parameters are given an
+individual value, or the values are tuned across a grid. The posterior
+enables Bayesian inference on BART’s predictions.</p>
+</div>
+<div id="how-can-a-bayesian-method-be-machine-learning" class="section level3">
+<h3>How can a Bayesian method be machine learning?</h3>
+<p>Instead of specifying a specific functional form as you would in a
+Bayesian generalized linear model (GLM), you specify priors governing a
+tree structure (e.g., the depth of trees, the variables to split on),
+and that structure is used to model the regression function. It’s still
+Bayesian because all components of the model have a prior and posterior,
+but rather than putting priors on GLM coefficients, you put priors on
+aspects of the machine learning model.</p>
+</div>
+<div id="how-can-bart-be-used-for-inference" class="section level3">
+<h3>How can BART be used for inference?</h3>
+<p>Because each prediction from the model has a posterior, any quantity
+derived from the predictions, like average marginal effects, has one
+too. These can be used as part of a modern regression workflow through
+tools like <em>marginaleffects</em> <span class="citation">(<a href="#ref-arelbundock2024">Arel-Bundock et al. 2024</a>)</span>, which
+produce interpretable estimates from regression models in model-agnostic
+ways <span class="citation">(<a href="#ref-rohrerModelsPredictionMachines2026">Rohrer and Arel-Bundock
+2026</a>)</span>. These tools make the black-box nature of machine
+learning models no longer problematic for arriving at interpretable
+model summaries, and the posteriors of these quantities allow for
+Bayesian inference on them.</p>
+</div>
+<div id="how-do-i-get-estimates-out-of-the-model" class="section level3">
+<h3>How do I get estimates out of the model?</h3>
+<p><code>predict()</code> gives you the fitted values or the full
+posterior of them. <code>estimate_effect()</code> turns those into a
+treatment effect: the ATE, the ATT, or one effect per unit, with a
+credible interval and on the response scale, which is the scale on which
+averaging unit-level contrasts gives the marginal effect.
+<code>partial_dependence()</code> shows how the prediction moves with
+one or two predictors, and <code>plot()</code> on a fit draws it.
+<code>variable_importance()</code> reports how often each predictor is
+split on, which is a rough guide to what the model is using but not a
+test of anything.</p>
+<p>For the quantities those do not cover,
+<code>marginaleffects::avg_comparisons()</code> and its relatives work
+on a fit directly, including arbitrary contrasts between covariate
+values, hypotheses comparing one estimate to another, and slopes.
+Because every draw goes through the same machinery either way, the
+result carries a posterior rather than a point estimate with a
+delta-method standard error. See <code>vignette(&quot;effects&quot;)</code> for
+the worked versions and <code>?estimate_effect</code> for the
+estimands.</p>
+</div>
+<div id="what-if-i-have-missing-data" class="section level3">
+<h3>What if I have missing data?</h3>
+<p>Missing values in the predictors are fine and nothing is dropped for
+them, though <code>predict()</code> accepts a missing value only in a
+column that had one at fitting time, since only those columns’ rules
+carry an answer for it. Each splitting rule carries its own answer for
+what to do with a missing value, drawn from the prior alongside the
+variable and the cutpoint, so the missingness is part of the model
+rather than something to impute first. This is missingness incorporated
+in attributes, and it means a covariate can be informative through
+whether it is observed as well as through its value. Missingness in the
+outcome is different: those rows are dropped, with a warning saying how
+many.</p>
+</div>
+<div id="can-i-supply-my-own-likelihood" class="section level3">
+<h3>Can I supply my own likelihood?</h3>
+<p>Yes, through <code>custom_family()</code>, which is the feature the
+package is named for. You give it a function of the response and the
+additive predictors, <code>function(y, eta)</code>, returning one log
+density per observation, and the sampler does the rest; you do not have
+to derive a conjugate update or write any C++. The trade-off is that a
+log density says nothing about how to draw from the distribution it
+describes, so a custom family has no posterior predictive draws, and
+everything built on them, including <code>pp_check()</code> and
+<code>posterior_predict()</code>, is unavailable. Fitting, prediction on
+the link scale, and <code>loo()</code> all work, though
+<code>predict(type = &quot;response&quot;)</code> hands back the additive
+predictors rather than a fitted mean, since the package cannot know
+where the mean of a supplied density sits.</p>
+</div>
+<div id="why-is-my-model-slow-and-what-should-i-change-first" class="section level3">
+<h3>Why is my model slow, and what should I change first?</h3>
+<p>The settings below matter most, in the order worth trying them. Cost
+is close to linear in <code>num_trees</code>, and a second forest can
+usually be smaller than the first, so setting
+<code>num_trees = c(mean = 50, log_sd = 10)</code> on a location-scale
+model is much cheaper than 50 for both. Setting
+<code>gate = &quot;hard&quot;</code> is several times faster than the soft default
+and costs nothing if the relationship is well approximated by a step
+function. The <code>bandwidth_every</code> argument controls how often
+the soft-rule bandwidth is resampled, and raising it keeps soft rules
+while recovering some of that speed; it is not free, though, since the
+bandwidth update lets the rules sharpen toward a step, so it costs some
+mixing and some accuracy on a mean function with jumps. Setting
+<code>update_bandwidth = FALSE</code> stops resampling it altogether,
+which is faster again and can actually be more accurate on smooth
+functions but much worse on nonsmooth ones. Beyond those, run the chains
+in parallel with a <em>future</em> plan, which costs nothing in
+draws.</p>
+</div>
+<div id="what-if-im-a-frequentist" class="section level3">
+<h3>What if I’m a frequentist?</h3>
+<p>You don’t have to use the full posterior for inference; you can use
+the predictions from a BART model (e.g., the posterior mean for each
+prediction) in a frequentist estimator like double/debiased machine
+learning (DML) <span class="citation">(<a href="#ref-ahrensIntroductionDoubleDebiased2026">Ahrens et al.,
+n.d.</a>; <a href="#ref-chernozhukov2018">Chernozhukov et al.
+2018</a>)</span> or targeted maximum likelihood estimation (TMLE) <span class="citation">(<a href="#ref-schulerTargetedMaximumLikelihood2017">Schuler and Rose
+2017</a>; <a href="#ref-vanderlaanTargetedMaximumLikelihood2006">Laan
+and Rubin 2006</a>)</span>. These methods only require predictions from
+models and allow you to perform valid frequentist inference on specific
+estimands. That said, some also treat the resulting credible intervals
+as confidence intervals, but the frequentist operating characteristics
+of these intervals are not guaranteed.</p>
+</div>
+<div id="is-bart-good" class="section level3">
+<h3>Is BART good?</h3>
+<p>Yes! BART or a related method won the American Causal Inference
+Conference Data Competition in both of the years whose results have been
+written up <span class="citation">(<a href="#ref-dorie2019">Dorie et al.
+2019</a>; <a href="#ref-hahnAtlanticCausalInference2019">Hahn et al.
+2019</a>)</span>. This is a competition to see which method can estimate
+treatment effects as accurately as possible (including with accurate
+inference) across a wide variety of data-generating processes. For
+general prediction, BART has been shown to do as well or better than
+popular methods like GBM and random forests <span class="citation">(<a href="#ref-chipman2010">Chipman et al. 2010</a>)</span>.</p>
+</div>
+<div id="how-can-bart-be-used-for-causal-inference" class="section level3">
+<h3>How can BART be used for causal inference?</h3>
+<p>The only step BART can be used for in causal inference is causal
+effect estimation, i.e., estimating causal effects given causal
+assumptions on the data. It works like any other regression method as
+part of a causal effect estimator. The award-winning use of BART often
+involves BART-based g-computation <span class="citation">(<a href="#ref-hill2011">Hill 2011</a>; <a href="#ref-snowdenImplementationGComputationSimulated2011">Snowden et
+al. 2011</a>; <a href="#ref-dorie2019">Dorie et al. 2019</a>; <a href="#ref-carnegie2019">Carnegie 2019</a>)</span>, which involves
+modeling the relationship between the outcome, treatment, and
+confounders, and using that model to predict the counterfactual outcomes
+under each treatment for each unit. See <code>vignette(&quot;causal&quot;)</code>
+for a walkthrough with <em>bartisan</em>. BART can also be used to
+estimate propensity scores <span class="citation">(<a href="#ref-hillChallengesPropensityScore2011">Hill et al.
+2011</a>)</span>, which, together with a BART outcome model, can be used
+in doubly robust estimators like DML and TMLE. BART can also be used in
+instrumental variables analysis <span class="citation">(<a href="#ref-mccullochCausalInferenceInstrumental2021">McCulloch et al.,
+n.d.</a>)</span> and regression discontinuity <span class="citation">(<a href="#ref-alcantaraModifiedBARTLearning2024">Alcantara et al.
+2024</a>)</span>.</p>
+</div>
+<div id="what-are-bayesian-causal-forests" class="section level3">
+<h3>What are Bayesian Causal Forests?</h3>
+<p>Bayesian Causal Forests (BCF) are a modification of BART used to
+estimate treatment effects <span class="citation">(<a href="#ref-hahn2020">Hahn et al. 2020</a>)</span>. In addition to
+flexibly modeling the relationship between the outcome and the
+covariates, it also flexibly models the relationship between the
+magnitude of the treatment effect and the covariates. In this way, BCF
+is a varying-coefficient model <span class="citation">(<a href="#ref-deshpande2026">Deshpande et al. 2026</a>)</span>. Compared to
+traditional BART, BCF tends to have better calibrated intervals and
+regularization of heterogeneous treatment effects. BCF tends to
+outperform traditional BART in most causal inference contexts. It also
+tends to outperform generalized random forests (GRF), which serve a
+similar function. <code>bcf()</code> fits it;
+<code>vignette(&quot;varying&quot;)</code> covers the varying-coefficient model it
+is a case of and what <code>bcf()</code> sets on top of it.</p>
+</div>
+<div id="how-do-i-get-a-treatment-effect" class="section level3">
+<h3>How do I get a treatment effect?</h3>
+<p><code>estimate_effect()</code> reports it, with the two average
+potential outcomes printed beneath. A fit from <code>bcf()</code>
+carries its own treatment, so nothing else has to be named:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">bcf</span>(y <span class="sc">~</span> x1 <span class="sc">+</span> x2, <span class="at">treat =</span> <span class="sc">~</span> z, <span class="at">data =</span> d)</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a><span class="fu">estimate_effect</span>(fit)</span></code></pre></div>
+<p>The estimand is an argument: setting <code>estimand = &quot;ATT&quot;</code>
+averages over the treated instead of over everyone, setting
+<code>estimand = &quot;CATE&quot;</code> returns one effect per unit, supplying
+<code>by = ~ g</code> gives subgroup effects, and setting
+<code>comparison = &quot;ratio&quot;</code> reports a ratio rather than a
+difference. On a fit from <code>bartisan()</code> rather than
+<code>bcf()</code> it works the same way once the <code>treat</code>
+argument names the column. <code>plot()</code> draws whatever was asked
+for, and <code>diagnose()</code> on the result says whether the estimand
+itself has mixed, which is not implied by the fit’s own diagnostics.</p>
+<p>See <code>vignette(&quot;causal&quot;)</code> for a worked version, including
+the assumptions that turn the estimate into a causal effect, which no
+model supplies.</p>
+</div>
+<div id="what-papers-should-i-read-to-better-understand-bart" class="section level3">
+<h3>What papers should I read to better understand BART?</h3>
+<p>BART has a growing literature spread across multiple fields. We
+recommend reading the original BART paper by <span class="citation">Chipman et al. (<a href="#ref-chipman2010">2010</a>)</span>, the paper introducing BART for
+causal inference by <span class="citation">Hill (<a href="#ref-hill2011">2011</a>)</span>, an accessible paper on BART for
+social scientists <span class="citation">Green and Kern (<a href="#ref-greenModelingHeterogeneousTreatment2012">2012</a>)</span>,
+and the Annual Reviews paper on BART by <span class="citation">Hill et
+al. (<a href="#ref-hill2020">2020</a>)</span>.</p>
+</div>
+<div id="what-does-the-name-bartisan-mean" class="section level3">
+<h3>What does the name “bartisan” mean?</h3>
+<p><em>bartisan</em> is a portmanteau of BART and “artisan”.
+<em>bartisan</em> allows you to supply your own likelihood to fit the
+BART model of your choice without needing to derive or program the whole
+machinery to do so. In this way, you can build an artisanal model for
+your specific scenario. In addition, the package offers a high degree of
+flexibility and customization for its built-in models, including hard
+and smooth gates for the trees, random effects, varying coefficient
+models, many model families, and control of sparsity.</p>
+</div>
+<div id="how-does-bartisan-differ-from-other-bart-implementations-in-r" class="section level3">
+<h3>How does <em>bartisan</em> differ from other BART implementations in
+R?</h3>
+<p>There are many R packages that implement BART, each of which has its
+own strengths. <em>bartisan</em> aims to be highly general but with
+intelligent defaults that make it easy to simply plug in in place of a
+GLM or generalized additive model (GAM) as part of a data analysis
+workflow. <em>bartisan</em> offers many more model types and families
+than other packages. Often, R packages will be built to implement a few
+specific features of BART; for example, <a href="https://cran.r-project.org/package=SoftBart"><em>SoftBart</em></a>
+implements soft decision trees, <a href="https://cran.r-project.org/package=VCBART"><em>VCBART</em></a>
+implements the varying coefficient model, <a href="https://cran.r-project.org/package=dbarts"><em>dbarts</em></a>
+implements Normal and probit BART regression with optional random
+intercepts. <code>vignette(&quot;implementation&quot;)</code> has a
+feature-by-feature comparison against the most popular BART packages,
+along with the relative cost of each family. <em>bartisan</em> was
+designed to incorporate as many recent advancements in BART theory and
+practice as possible, including models for different outcome types
+(e.g., multinomial, ordinal, <span class="math inline">\(\left[ 0, 1
+\right]\)</span>-bounded, zero-inflated), soft trees, sparsity priors,
+varying coefficients, random effects, and more, all in a single
+package<a href="#fn1" class="footnote-ref" id="fnref1"><sup>1</sup></a>.
+There are ways in which <em>bartisan</em> is inferior to these more
+specialized packages, but as a general-purpose tool, we hope you’ll find
+it effective.</p>
+</div>
+<div id="what-model-family-should-i-use" class="section level3">
+<h3>What model family should I use?</h3>
+<p>This of course depends on the outcome and the assumptions you are
+willing to make about it. In general, the defaults are a good starting
+point, though for numeric outcomes, bounding (e.g., at 0 or 1, inclusive
+or exclusive, or integer or continuous) might suggest different
+families. Check out <code>vignette(&quot;families&quot;)</code> and
+<code>?bartisan-families</code> for more details and help with this
+decision.</p>
+</div>
+<div id="how-should-i-select-the-values-of-the-hyperparameters" class="section level3">
+<h3>How should I select the values of the hyperparameters?</h3>
+<p>One of the great advantages of BART is that performance tends to be
+strong using the default hyperparameters, and tuning them with
+cross-validation tends to buy very little for the increase in
+computation. We recommend changing the default parameters only if you
+understand very well what each one does.</p>
+<p>That said, there are a few hyperparameters that might be considered.
+The <code>gate</code> argument controls whether hard or soft decision
+trees are used; the default, soft decision trees, tend to perform better
+when modeling smooth relationships, but they cost substantially more
+computation, because every observation reaches every leaf with some
+weight rather than taking one side of each split. Setting
+<code>gate = &quot;hard&quot;</code> is the fast option when the relationship is
+expected to be a step function anyway. The <code>sparsity</code>
+argument controls whether a variable-selection prior is placed on the
+covariates chosen for splitting; it is off by default, so every
+covariate keeps a share of the splits. Setting
+<code>sparsity = TRUE</code> is worth considering when there are many
+predictors, when only a few of them are expected to matter, or when the
+goal is to identify the subset of predictors the model needs, but not
+when an effect is being estimated, since a predictor the prior drops has
+an effect of exactly zero in that draw. The <code>split_prior</code>
+argument can also be used instead of <code>sparsity</code> to manually
+decide which variables should be split on more often, though in general
+the Bayesian updates can discover this from the data anyway. See
+<code>?bartisan_control</code> for a full list.</p>
+</div>
+<div id="how-should-i-choose-how-many-chains-and-burn-in-and-posterior-draws" class="section level3">
+<h3>How should I choose how many chains and burn-in and posterior
+draws?</h3>
+<p>For all of these parameters, more is always better but requires more
+computation and more memory usage. It can be a good idea to build your
+model on synthetic data with the default number of burn-in and posterior
+draws, and then to use a much higher number for the final analysis on
+the real data. More chains come almost for free in wall-clock terms if
+you have parallel processing, as each chain can be run in parallel,
+whereas burn-in and posterior draws must be run sequentially. They are
+not free diagnostically, though, and it is worth knowing which way that
+cuts. Effective sample size depends on the total number of draws you
+keep and not on how they are split up, so four chains of 10,000 and
+eight of 5,000 give you about the same precision. But R-hat compares
+chains against each other, and the value it takes under a perfectly
+behaved sampler rises with the number of chains being compared: it sits
+near <span class="math inline">\(1 + m/S\)</span> for <span class="math inline">\(m\)</span> chains and effective sample size <span class="math inline">\(S\)</span>. Splitting a fixed budget into more
+chains therefore raises the bar R-hat has to clear without buying any
+more information, and a fit that passes at four chains can warn at
+twelve. Two to four chains is a good default, and when a quantity fails
+<code>diagnose()</code>’s R-hat threshold on too few effective draws for
+the comparison to mean anything, the report adds a line saying the
+number cannot be read yet rather than letting it stand on its own. See
+<code>vignette(&quot;diagnostics&quot;)</code> for more information on diagnosing
+and fixing poor mixing.</p>
+</div>
+<div id="references" class="section level2 unnumbered">
+<h2 class="unnumbered">References</h2>
+<div id="refs" class="references csl-bib-body hanging-indent">
+<div id="ref-ahrensIntroductionDoubleDebiased2026" class="csl-entry">
+Ahrens, Achim, Victor Chernozhukov, Christian Hansen, Damian Kozbur,
+Mark Schaffer, and Thomas Wiemann. n.d. <em>An Introduction to
+Double/Debiased Machine Learning</em>. <a href="https://doi.org/10.48550/arXiv.2504.08324">https://doi.org/10.48550/arXiv.2504.08324</a>.
+</div>
+<div id="ref-alcantaraModifiedBARTLearning2024" class="csl-entry">
+Alcantara, Rafael, Meijia Wang, P. Richard Hahn, and Hedibert Lopes.
+2024. <em>Modified BART for Learning Heterogeneous Effects in Regression
+Discontinuity Designs</em>. <a href="https://doi.org/10.48550/arXiv.2407.14365">https://doi.org/10.48550/arXiv.2407.14365</a>.
+</div>
+<div id="ref-arelbundock2024" class="csl-entry">
+Arel-Bundock, Vincent, Noah Greifer, and Andrew Heiss. 2024. <span>“How
+to Interpret Statistical Models Using <span class="nocase">marginaleffects</span> for <span>R</span> and
+<span>Python</span>.”</span> <em>Journal of Statistical Software</em>
+111 (9): 1–32. <a href="https://doi.org/10.18637/jss.v111.i09">https://doi.org/10.18637/jss.v111.i09</a>.
+</div>
+<div id="ref-carnegie2019" class="csl-entry">
+Carnegie, Nicole Bohme. 2019. <span>“Comment: Contributions of Model
+Features to <span>BART</span> Causal Inference Performance Using
+<span>ACIC</span> 2016 Competition Data.”</span> <em>Statistical
+Science</em> 34 (1): 90–93. <a href="https://doi.org/10.1214/18-STS682">https://doi.org/10.1214/18-STS682</a>.
+</div>
+<div id="ref-chernozhukov2018" class="csl-entry">
+Chernozhukov, Victor, Denis Chetverikov, Mert Demirer, et al. 2018.
+<span>“Double/Debiased Machine Learning for Treatment and Structural
+Parameters.”</span> <em>The Econometrics Journal</em> 21 (1): C1–68. <a href="https://doi.org/10.1111/ectj.12097">https://doi.org/10.1111/ectj.12097</a>.
+</div>
+<div id="ref-chipman2010" class="csl-entry">
+Chipman, Hugh A., Edward I. George, and Robert E. McCulloch. 2010.
+<span>“<span>BART</span>: Bayesian Additive Regression Trees.”</span>
+<em>The Annals of Applied Statistics</em> 4 (1): 266–98. <a href="https://doi.org/10.1214/09-AOAS285">https://doi.org/10.1214/09-AOAS285</a>.
+</div>
+<div id="ref-deshpande2026" class="csl-entry">
+Deshpande, Sameer K., Ray Bai, Cecilia Balocchi, Jennifer E. Starling,
+and Jordan Weiss. 2026. <span>“<span>VCBART</span>: Bayesian Trees for
+Varying Coefficients.”</span> <em>Bayesian Analysis</em> 21 (1):
+281–308. <a href="https://doi.org/10.1214/24-BA1470">https://doi.org/10.1214/24-BA1470</a>.
+</div>
+<div id="ref-dorie2019" class="csl-entry">
+Dorie, Vincent, Jennifer Hill, Uri Shalit, Marc Scott, and Dan Cervone.
+2019. <span>“Automated Versus Do-It-Yourself Methods for Causal
+Inference: Lessons Learned from a Data Analysis Competition.”</span>
+<em>Statistical Science</em> 34 (1): 43–68. <a href="https://doi.org/10.1214/18-STS667">https://doi.org/10.1214/18-STS667</a>.
+</div>
+<div id="ref-greenModelingHeterogeneousTreatment2012" class="csl-entry">
+Green, Donald P., and Holger L. Kern. 2012. <span>“Modeling
+Heterogeneous Treatment Effects in Survey Experiments with Bayesian
+Additive Regression Trees.”</span> <em>Public Opinion Quarterly</em> 76
+(3): 491–511. <a href="https://doi.org/10.1093/poq/nfs036">https://doi.org/10.1093/poq/nfs036</a>.
+</div>
+<div id="ref-hahnAtlanticCausalInference2019" class="csl-entry">
+Hahn, P. Richard, Vincent Dorie, and Jared S. Murray. 2019.
+<span>“Atlantic Causal Inference Conference (ACIC) Data Analysis
+Challenge 2017.”</span> <em>arXiv:1905.09515 [Stat]</em>, May. <a href="https://arxiv.org/abs/1905.09515">https://arxiv.org/abs/1905.09515</a>.
+</div>
+<div id="ref-hahn2020" class="csl-entry">
+Hahn, P. Richard, Jared S. Murray, and Carlos M. Carvalho. 2020.
+<span>“Bayesian Regression Tree Models for Causal Inference:
+Regularization, Confounding, and Heterogeneous Effects (with
+Discussion).”</span> <em>Bayesian Analysis</em> 15 (3): 965–1056. <a href="https://doi.org/10.1214/19-BA1195">https://doi.org/10.1214/19-BA1195</a>.
+</div>
+<div id="ref-hill2011" class="csl-entry">
+Hill, Jennifer L. 2011. <span>“Bayesian Nonparametric Modeling for
+Causal Inference.”</span> <em>Journal of Computational and Graphical
+Statistics</em> 20 (1): 217–40. <a href="https://doi.org/10.1198/jcgs.2010.08162">https://doi.org/10.1198/jcgs.2010.08162</a>.
+</div>
+<div id="ref-hill2020" class="csl-entry">
+Hill, Jennifer, Antonio Linero, and Jared Murray. 2020. <span>“Bayesian
+Additive Regression Trees: A Review and Look Forward.”</span> <em>Annual
+Review of Statistics and Its Application</em> 7 (1): 251–78. <a href="https://doi.org/10.1146/annurev-statistics-031219-041110">https://doi.org/10.1146/annurev-statistics-031219-041110</a>.
+</div>
+<div id="ref-hillChallengesPropensityScore2011" class="csl-entry">
+Hill, Jennifer, Christopher Weiss, and Fuhua Zhai. 2011.
+<span>“Challenges with Propensity Score Strategies in a High-Dimensional
+Setting and a Potential Alternative.”</span> <em>Multivariate Behavioral
+Research</em> 46 (3): 477–513. <a href="https://doi.org/10.1080/00273171.2011.570161">https://doi.org/10.1080/00273171.2011.570161</a>.
+</div>
+<div id="ref-vanderlaanTargetedMaximumLikelihood2006" class="csl-entry">
+Laan, Mark J. van der, and Daniel Rubin. 2006. <span>“Targeted Maximum
+Likelihood Learning.”</span> <em>The International Journal of
+Biostatistics</em> 2 (1). <a href="https://doi.org/10.2202/1557-4679.1043">https://doi.org/10.2202/1557-4679.1043</a>.
+</div>
+<div id="ref-mccullochCausalInferenceInstrumental2021" class="csl-entry">
+McCulloch, Robert E., Rodney A. Sparapani, Brent R. Logan, and
+Purushottam W. Laud. n.d. <em>Causal Inference with the Instrumental
+Variable Approach and Bayesian Nonparametric Machine Learning</em>. <a href="https://doi.org/10.48550/arXiv.2102.01199">https://doi.org/10.48550/arXiv.2102.01199</a>.
+</div>
+<div id="ref-rohrerModelsPredictionMachines2026" class="csl-entry">
+Rohrer, Julia M., and Vincent Arel-Bundock. 2026. <span>“Models as
+Prediction Machines: How to Convert Confusing Coefficients into Clear
+Quantities.”</span> <em>Advances in Methods and Practices in
+Psychological Science</em> 9 (2): 25152459261424825. <a href="https://doi.org/10.1177/25152459261424825">https://doi.org/10.1177/25152459261424825</a>.
+</div>
+<div id="ref-schulerTargetedMaximumLikelihood2017" class="csl-entry">
+Schuler, Megan S., and Sherri Rose. 2017. <span>“Targeted Maximum
+Likelihood Estimation for Causal Inference in Observational
+Studies.”</span> <em>American Journal of Epidemiology</em> 185 (1):
+65–73. <a href="https://doi.org/10.1093/aje/kww165">https://doi.org/10.1093/aje/kww165</a>.
+</div>
+<div id="ref-snowdenImplementationGComputationSimulated2011" class="csl-entry">
+Snowden, Jonathan M., Sherri Rose, and Kathleen M. Mortimer. 2011.
+<span>“Implementation of g-Computation on a Simulated Data Set:
+Demonstration of a Causal Inference Technique.”</span> <em>American
+Journal of Epidemiology</em> 173 (7): 731–38. <a href="https://doi.org/10.1093/aje/kwq472">https://doi.org/10.1093/aje/kwq472</a>.
+</div>
+</div>
+</div>
+<div class="footnotes footnotes-end-of-document">
+<hr />
+<ol>
+<li id="fn1"><p>I am well aware of <a href="https://xkcd.com/927/">this
+xkcd comic</a>.<a href="#fnref1" class="footnote-back">↩︎</a></p></li>
+</ol>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

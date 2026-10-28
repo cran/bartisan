@@ -1,0 +1,334 @@
+---
+title: "Variable Importance"
+author: "Noah Greifer"
+date: "`r Sys.Date()`"
+output:
+  html_vignette:
+    toc: yes
+vignette: >
+  %\VignetteIndexEntry{Variable Importance}
+  %\VignetteEngine{knitr::rmarkdown_notangle}
+  %\VignetteEncoding{UTF-8}
+bibliography: references.bib
+link-citations: true
+---
+
+```{=html}
+<style>
+pre {overflow-x: auto;}
+pre code {word-wrap: normal; white-space: pre;}
+</style>
+```
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 6.5,
+                      fig.height = 3.4, dpi = 110, fig.align = "center",
+                      message = FALSE, warning = FALSE)
+options(digits = 3)
+
+# marginaleffects summarizes posterior draws with collapse, so both are needed.
+has_me <- rlang::is_installed(c("marginaleffects", "collapse"))
+run <- TRUE
+
+# The fits below are too slow to run on CRAN's machines, so their output is
+# saved ahead of time and replayed where the code is not run, as on CRAN; see
+# saved-results.R.
+source("saved-results.R", local = knitr::knit_global())
+knitr::opts_chunk$set(saved = TRUE)
+```
+
+## Introduction
+
+A fitted forest spends its splitting rules on some predictors and not others,
+and counting how it spends them is the usual measure of variable importance for
+BART. `variable_importance()` reports the count.
+
+This vignette covers what that number means, how to tell whether a difference in
+it is real, and the limits of what it measures. The last part matters more than
+the first: variable importance is the most over-read output in machine learning,
+and the failure modes are specific and checkable.
+
+In this guide we will first read the three statistics `variable_importance()`
+returns, and then calibrate them by adding predictors we know to be pure noise.
+Next we'll look at the two situations that most affect how the table should be
+read: a strong signal, where the separation between signal and noise is sharp,
+and correlated predictors, where the ranking is confidently wrong. Finally we'll
+cover what importance does not measure and what to make of the advice to reduce
+the number of trees when using BART to select variables.
+
+The fits use the default single chain for brevity. In a real analysis we would
+run several chains and possibly change the number of burn-in and retained draws;
+`vignette("diagnostics")` covers how to set these fit controls and how to check
+that they were enough.
+
+The fits also set `sparsity = TRUE`, which turns on the variable-selection
+prior. It is off by default, because it is a poor choice when an effect is
+being estimated, but when the question is which predictors the model needs it
+is the setting to use, for the reason the next section gives.
+
+```{r libs, eval = run}
+library(bartisan)
+
+data("rhc")
+
+model <- death ~ rhc + age + sex + race + edu + aps + meanbp + resp +
+  hema + pafi + paco2 + crea + surv2m + card
+```
+
+## Split Counts and Usage Proportions (`variable_importance()`)
+
+```{r vi, eval = run}
+set.seed(2026)
+
+fit <- bartisan(model, data = rhc, family = binomial(), sparsity = TRUE)
+
+imp <- variable_importance(fit)
+
+imp
+```
+
+The output has six columns, of which `print()` shows four, and the three read first answer different questions.
+
+`prop_used` is the proportion of draws in which the predictor received at least
+one rule, and it is the column to read first: with the sparsity prior on it
+behaves like a posterior probability that the predictor belongs in the model,
+which makes it the one to use when the question is which variables to keep.
+
+`prop_splits` is the predictor's share of all the splitting rules in the forest.
+It is the column to use when two fits are being compared, for the reason the
+section on `num_trees` below gives.
+
+`splits` is the average number of splitting rules the forest gives a predictor
+in one posterior draw; it says how much of the fitted structure the predictor
+accounts for. Its interval is in the returned data frame as `splits_lower` and
+`splits_upper`, and the `print()` method leaves it out of the displayed table to
+keep the ranking readable.
+
+The reason it behaves that way is the prior. With `sparsity = TRUE`, the
+variable a rule splits on is drawn from a Dirichlet-distributed set of
+probabilities [@linero2018sparse], which lets the forest concentrate on a few
+predictors and drop the rest entirely. A predictor that contributes nothing can
+fall to `prop_used` near zero, which is not possible under the default
+(`sparsity = FALSE`), where every predictor keeps a fixed share of the splitting
+probability, as in classic BART. In a forest of ordinary size every predictor is
+then used in nearly every draw, `prop_used` sits near 1 throughout, and the
+ranking is carried by the other two columns, which the `print()` method notes.
+
+The prognostic score, age, the treatment, and two of the physiological
+measurements sit at the top, as we would expect; at the other end, several
+predictors are used in only about half the draws.
+
+For a ranking this long the picture is easier to read than the table, and
+`plot()` draws it:
+
+```{r viplot, eval = run, fig.height = 4.2}
+plot(imp)
+```
+
+For a model wider than this one, subsetting first keeps the picture readable:
+`plot(head(imp, 10))` shows the top ten.
+
+And when the question is not one the summary answers, `draws = TRUE` returns the
+counts themselves, one row per posterior draw, so any comparison can be made
+directly. The posterior probability that the forest spends more rules on `aps`
+than on `meanbp`, for instance, is a proportion of draws:
+
+```{r vidraws, eval = run}
+counts <- variable_importance(fit, draws = TRUE)
+
+mean(counts[, "aps"] > counts[, "meanbp"])
+```
+
+That is worth doing before reading much into a difference in the table: two
+predictors adjacent in the ranking are usually not distinguishable, and this is
+how to find out.
+
+## Calibrating With Noise Predictors
+
+Is a middling `prop_used` low? The table cannot say. Before reading anything
+into the bottom of it, we should check what a predictor that certainly does not
+matter looks like on these data, which means adding a few.
+
+```{r noise, eval = run}
+set.seed(11)
+rhc_noise <- rhc
+for (j in 1:3) rhc_noise[[paste0("noise", j)]] <- rnorm(nrow(rhc_noise))
+
+set.seed(2026)
+fit_noise <- bartisan(update(model, . ~ . + noise1 + noise2 + noise3),
+                      data = rhc_noise, family = binomial(), sparsity = TRUE)
+
+variable_importance(fit_noise)
+```
+
+The noise variables do not sort to the bottom. They land in the middle of the
+table, above several of the real predictors, and that is the answer to the
+question: the lower half of this table carries no information, because a
+predictor ranked below a variable that is literally random cannot be said to
+matter less than it.
+
+Read the gap rather than the ranking. The predictors at the top sit well clear
+of the noise controls and can be said to matter, while everything from about the
+middle down is indistinguishable from random numbers on this sample, which is a
+more useful conclusion than an ordering and one the table alone would not have
+given us.
+
+This technique costs three lines and settles the question; we recommend it
+whenever an importance table is going to be interpreted.
+
+## Separation With a Stronger Signal
+
+The failure above is a property of these data rather than of the method: with
+more data and a stronger signal, the separation is sharp. Below we use the
+Friedman function, in which `x1` through `x5` enter the outcome and `x6` through
+`x10` are noise, at 500 observations.
+
+```{r friedman}
+friedman <- function(n) {
+  x <- as.data.frame(matrix(runif(n * 10), n, 10))
+  names(x) <- paste0("x", 1:10)
+  x$y <- 10 * sin(pi * x$x1 * x$x2) + 20 * (x$x3 - 0.5)^2 +
+    10 * x$x4 + 5 * x$x5 + rnorm(n)
+  x
+}
+
+set.seed(7)
+fit_fr <- bartisan(y ~ ., data = friedman(500), family = gaussian(),
+                   sparsity = TRUE)
+
+variable_importance(fit_fr)
+```
+
+The five real predictors sit at 1.00 and the five noise predictors below .06.
+None of them is exactly zero, which is a useful reminder that a noise variable
+is occasionally picked up for a draw or two, and a single moderate value is not
+evidence of anything. The gap that matters runs from the top of the noise to
+1.00, and it is wide.
+
+There is no threshold that is correct in general, so we look for the gap, cut
+inside it, and check that the conclusion does not depend on exactly where.
+
+## Correlated Predictors
+
+This is the failure mode most likely to mislead, because it produces a
+confident and wrong answer rather than an uninformative one.
+
+```{r corr}
+set.seed(5)
+n <- 400
+cd <- data.frame(x1 = runif(n))
+cd$x1_copy <- cd$x1 + rnorm(n, sd = 0.01)   # almost the same variable
+cd$x2 <- runif(n)
+cd$x3 <- runif(n)
+cd$y <- 3 * cd$x1 + rnorm(n, sd = 0.3)      # only x1 is in the truth
+
+fit_corr <- bartisan(y ~ ., data = cd, family = gaussian(), sparsity = TRUE)
+
+variable_importance(fit_corr)
+```
+
+The outcome depends on `x1`. The forest spent most of its splitting rules on
+`x1_copy` and most of the rest on `x1`, so read as a ranking, this table puts
+the variable that is not in the truth above the one that is.
+
+Nothing has gone wrong with the fit: the two variables carry the same
+information, so a tree that splits on either fits equally well, and the forest
+divided the rules unevenly. Predictions are unaffected; what is affected is any
+statement about which variable matters.
+
+The same thing happens to the effects:
+
+```{r correff, eval = has_me}
+library(marginaleffects)
+
+avg_comparisons(fit_corr, variables = c("x1", "x1_copy"))
+```
+
+The copy takes most of the association; the original's interval covers zero.
+Moving both together, as a change in the underlying quantity would, recovers
+the truth:
+
+```{r corrjoint}
+lo <- transform(cd, x1 = 0.25, x1_copy = 0.25)
+hi <- transform(cd, x1 = 0.75, x1_copy = 0.75)
+
+drawn <- rowMeans(predict(fit_corr, newdata = hi, draws = TRUE) -
+                    predict(fit_corr, newdata = lo, draws = TRUE))
+
+round(c(estimate = mean(drawn), quantile(drawn, c(0.025, 0.975))), 3)
+```
+
+The true difference over that range is 1.5, so the model knows the relationship;
+it just cannot say which of two identical columns it belongs to.
+
+The practical rule is to treat a set of correlated predictors as one unit: we
+decide in advance which variables measure the same underlying thing, and then
+report and move them together.
+
+## The Limits of a Usage Ranking
+
+**It is not an effect size.** How often a predictor is split on and how much it
+moves the outcome are different quantities, and they can disagree in both
+directions; a predictor with a small effect over a range that gets split
+repeatedly will show high usage. When the question is how much the outcome
+changes, `partial_dependence()` shows how the prediction moves with the
+predictor and `avg_comparisons()` answers it as a contrast, both with an
+interval. See
+`vignette("effects")`.
+
+**It is not a test.** `prop_used` is a posterior probability under a particular
+prior (i.e., the Dirichlet sparsity prior). It has no error rate attached, and
+the choice of cutoff is left to the analyst. The noise-control technique above
+is the closest thing to a calibration of that cutoff, and it is informal.
+
+**It is not causal.** A ranking of predictors describes this fitted function on
+this sample. It says nothing about what would happen if any of them were
+changed, and a variable can rank highly because it is a consequence of the
+outcome, a proxy for a confounder, or correlated with something that matters.
+See `vignette("causal")`.
+
+## The Number of Trees (`num_trees`)
+
+A recommendation that circulates is to reduce the number of trees when using
+BART for variable selection. It comes from @chipman2010, who observe that
+counting splits works poorly with many trees because "the redundancy offered by
+so many trees tends to mix many irrelevant predictors in with the relevant
+ones", and that predictors compete for splits when the forest is small.
+
+The advice is correct for classic BART, which is the default here, and largely
+unnecessary once the sparsity prior is on. Measured on the Friedman function at
+500 observations over three replicates, the mean `prop_used` for the five noise
+predictors was:
+
+| Trees| sparsity = FALSE (default)| sparsity = TRUE|
+|-----:|--------------------------:|---------------:|
+|    10|                       0.28|            0.09|
+|    20|                       0.50|            0.08|
+|    50|                       0.95|            0.09|
+|   100|                       1.00|            0.14|
+
+Under the default the advice is essential if the table is to be read for
+selection: at 50 trees the noise predictors are used in 95% of draws and cannot
+be told apart from the real ones. With the prior on, they stay near zero at
+every tree count. The recommendation addresses the same problem the prior
+addresses, and there is little left for it to do; a smaller forest also mixes
+worse, so it is not free.
+
+To check on a given dataset, we can fit at the default forest size and again at
+20 trees and see whether the conclusion changes. It usually will not.
+
+`prop_splits` is the column to compare when we do, because `splits` cannot be:
+it counts rules, so a forest of 50 trees reports several times the count of a
+forest of 20 without being several times as informative. The share is computed
+within each draw, so it adds to one at any forest size. It is not invariant,
+since the number of trees also changes how the rules get allocated, but the
+ranking carries over, and the ranking is the subject of the comparison.
+
+## Further Reading
+
+`vignette("effects")` covers how much predictors move the outcome, which is the
+question importance is usually a proxy for. `vignette("comparison")` covers
+choosing between models that include different variables, which is the other way
+to ask whether a variable earns its place.
+
+## References

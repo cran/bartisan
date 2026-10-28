@@ -1,0 +1,393 @@
+test_that("bartisan_control validates its arguments", {
+  expect_s3_class(bartisan_control(), "bartisan_control")
+
+  expect_error(bartisan_control(num_trees = 0), "must be")
+  expect_error(bartisan_control(num_trees = 2.5), "whole")
+
+  # `num_trees` takes a number rather than deriving one, so there is nothing for
+  # `NULL` to mean and it is refused along with the zero-length vector that the
+  # package counts as the same thing.
+  expect_identical(bartisan_control()[["num_trees"]], 50L)
+  expect_error(bartisan_control(num_trees = NULL), "non-NULL")
+  expect_error(bartisan_control(num_trees = integer(0)), "non-NULL")
+  expect_error(bartisan_control(num_trees = NA_integer_), "NA")
+  expect_error(bartisan_control(num_trees = c(10L, NA_integer_)), "NA")
+  expect_error(bartisan_control(gate = "yes"), "should be one of")
+  expect_error(bartisan_control(sparsity = "yes"), "should be one of")
+
+  # A vector of tree counts is accepted here; how many forests there are is not
+  # known until the family is, so the length check belongs to `bartisan()`.
+  expect_identical(bartisan_control(num_trees = c(10, 20))[["num_trees"]],
+                   c(10L, 20L))
+  expect_error(bartisan_control(bandwidth = -1), "must be")
+  expect_error(bartisan_control(gamma = 1.5), "must be")
+  expect_error(bartisan_control(sigma_mu = -1), "must be positive")
+  expect_error(bartisan_control(sigma_mu_ramp = 2), "must be between")
+  expect_error(bartisan_control(x_transform = "nope"), "should be one of")
+})
+
+test_that("bartisan rejects a control that did not come from bartisan_control", {
+  d <- sim_x(seed = 31)
+  d$y <- stats::rnorm(nrow(d))
+
+  expect_error(bartisan(y ~ ., data = d, control = list(num_trees = 5)),
+               "must be the result of")
+})
+
+test_that("the leaf scale defaults to the documented value", {
+  d <- sim_x(seed = 32)
+  d$y <- 5 * d$x1 + stats::rnorm(nrow(d))
+
+  ctrl <- quick_control(num_trees = 8L, k = 2, update_sigma_mu = FALSE,
+                        sigma_mu_ramp = 0)
+  fit <- bartisan(y ~ ., data = d, control = ctrl)
+
+  expected <- 3 * stats::sd(d$y) / (2 * sqrt(8))
+  expect_equal(unname(fit[["sigma_mu"]][1L, 1L]), expected, tolerance = 1e-8)
+})
+
+test_that("both predictor transforms map into the unit interval", {
+  d <- sim_x(seed = 33)
+  d$x2 <- d$x2 * 1000 + 500
+  d$y <- stats::rnorm(nrow(d))
+
+  for (type in c("quantile", "range")) {
+    fit <- bartisan(y ~ ., data = d, control = quick_control(x_transform = type))
+    mapped <- vapply(seq_along(fit[["unit_maps"]]), function(j) {
+      z <- fit[["unit_maps"]][[j]](d[[j]])
+      all(z >= 0 & z <= 1)
+    }, logical(1L))
+    expect_true(all(mapped))
+  }
+})
+
+test_that("a binary predictor maps to zero and one under either transform", {
+  for (type in c("quantile", "range")) {
+    f <- make_unit_map(c(0, 1, 1, 0), type)
+    expect_identical(f(c(0, 1)), c(0, 1))
+  }
+})
+
+test_that("a constant predictor maps to a single interior value", {
+  f <- make_unit_map(rep(3, 10), "quantile")
+  expect_identical(f(c(3, 3)), c(0.5, 0.5))
+})
+
+test_that("the sparsity prior is disabled when there is only one group", {
+  d <- sim_x(p = 1, seed = 34)
+  d$y <- 2 * d$x1 + stats::rnorm(nrow(d))
+
+  fit <- bartisan(y ~ x1, data = d, control = quick_control())
+
+  expect_identical(ncol(fit[["counts"]][["eta"]]), 1L)
+  expect_s3_class(fit, "bartisan_fit")
+})
+
+test_that("turning off the ramp leaves the leaf scale free to move", {
+  d <- sim_x(seed = 35)
+  d$y <- 2 * d$x1 + stats::rnorm(nrow(d))
+
+  fit <- bartisan(y ~ ., data = d,
+                  control = quick_control(sigma_mu_ramp = 0,
+                                          update_sigma_mu = TRUE))
+
+  expect_true(stats::sd(fit[["sigma_mu"]][, 1L]) > 0)
+})
+
+test_that("split_prior validates against the model's own predictors", {
+  d <- sim_x(seed = 51)
+  d$y <- stats::rnorm(nrow(d))
+
+  expect_error(bartisan_control(split_prior = c(3, 1)), "must be named")
+  expect_error(bartisan_control(split_prior = c(x1 = 1, x1 = 2)), "repeated")
+  expect_error(bartisan_control(split_prior = c(x1 = -2)), "non-negative")
+  expect_error(bartisan_control(split_prior = c(x1 = Inf)), "non-negative")
+
+  # Zero is legitimate: it holds the predictor out of every tree while leaving
+  # it in the model frame. All of them zero is not, since nothing would be left
+  # to split on.
+  expect_no_error(bartisan_control(split_prior = c(x1 = 0)))
+
+  # Every predictor at zero leaves nothing to split on. Caught once the weights
+  # are spread over the model's predictors, since an unnamed one defaults to 1.
+  expect_error(bartisan(y ~ x1 + x2, data = d,
+                        control = quick_control(split_prior = c(x1 = 0, x2 = 0))),
+               "weight of zero")
+  expect_no_error(resolve_split_weights(c(x1 = 0, x2 = 0),
+                                        c("x1", "x2", "x3")))
+
+  # A name the model does not have is an error rather than a silent no-op: the
+  # weight is a claim about a particular predictor, so a typo in it would change
+  # nothing and say nothing.
+  expect_error(bartisan(y ~ x1 + x2, data = d,
+                        control = quick_control(split_prior = c(nope = 2))),
+               "does not have")
+
+  # `split_prior` replaces the sparsity prior, and says so only when the caller
+  # asked for both.
+  expect_warning(bartisan_control(sparsity = TRUE, split_prior = c(x1 = 2)),
+                 "overrides")
+  expect_no_warning(ctrl <- bartisan_control(split_prior = c(x1 = 2)))
+  expect_false(ctrl[["update_s"]])
+  expect_false(ctrl[["update_alpha"]])
+})
+
+test_that("split_prior normalizes to the documented probabilities", {
+  # The example from the documentation: three predictors, c(x1 = 3, x3 = 0.5)
+  # gives 3/4.5, 1/4.5 and 0.5/4.5.
+  w <- resolve_split_weights(c(x1 = 3, x3 = 0.5), c("x1", "x2", "x3"))
+
+  expect_equal(w, c(x1 = 3, x2 = 1, x3 = 0.5) / 4.5)
+  expect_equal(sum(w), 1)
+
+  # An unnamed predictor takes a weight of one, and order follows the model
+  # rather than the argument.
+  expect_equal(resolve_split_weights(c(x3 = 2), c("x1", "x2", "x3")),
+               c(x1 = 1, x2 = 1, x3 = 2) / 4)
+})
+
+test_that("a split_prior weight of zero keeps a predictor out of every tree", {
+  d <- sim_x(n = 300, p = 3, seed = 53)
+  d$y <- 2 * d$x1 + stats::rnorm(nrow(d))
+
+  fit <- bartisan(y ~ ., data = d, family = gaussian(),
+                  control = bartisan_control(num_trees = 10, num_burn = 100,
+                                             num_draws = 100, verbose = FALSE,
+                                             split_prior = c(x2 = 0)))
+
+  vi <- variable_importance(fit)
+  held_out <- vi[vi[["variable"]] == "x2", ]
+
+  expect_identical(held_out[["splits"]], 0)
+  expect_identical(held_out[["prop_used"]], 0)
+
+  # The predictor is still in the model frame, so `predict()` still wants it and
+  # the formula is unchanged.
+  expect_true("x2" %in% attr(stats::terms(fit), "term.labels"))
+  expect_no_error(predict(fit, newdata = d))
+})
+
+test_that("split_prior moves the splitting rules where it says", {
+  skip_on_cran()
+
+  # Pure noise, so nothing in the data prefers any predictor and the realized
+  # share of rules is the prior and only the prior.
+  d <- sim_x(n = 400, p = 4, seed = 52)
+  d$y <- stats::rnorm(nrow(d))
+
+  share <- function(fit) {
+    counts <- colMeans(fit[["counts"]][["eta"]])
+    counts / sum(counts)
+  }
+
+  fit <- bartisan(y ~ ., data = d, family = gaussian(),
+                  control = bartisan_control(num_trees = 20, num_burn = 200,
+                                             num_draws = 200, verbose = FALSE,
+                                             split_prior = c(x1 = 8)))
+
+  got <- share(fit)
+
+  # 8 / 11 against 1 / 11 for the other three. Loose tolerance: this is a
+  # realized frequency over a finite chain, not the probability itself.
+  expect_equal(unname(got[["x1"]]), 8 / 11, tolerance = 0.1)
+  expect_true(all(got[setdiff(names(got), "x1")] < got[["x1"]] / 3))
+
+  # The weights are fixed, so a predictor missing out on a rule is sampling
+  # variation in a small forest rather than the sparsity prior's persistent
+  # exclusion. At 20 trees that leaves `prop_used` high for everything; it
+  # reaches 1 for every predictor by 50 trees, which is what the sparsity prior
+  # does not do.
+  expect_true(all(variable_importance(fit)[["prop_used"]] > 0.8))
+})
+
+test_that("the leaf scale is drawn for the part of warmup after the ramp", {
+  skip_on_cran()
+
+  # The ramp holds `sigma_mu` at a fraction of its target and switches its
+  # update off. Nothing used to switch the update back on when the ramp ended,
+  # so the scale was frozen for the rest of warmup and took its first draw at
+  # the first retained iteration: it jumped from the ramp target to wherever the
+  # leaves wanted it, roughly a factor of four, and then the trees spent the
+  # sampling phase equilibrating to the new scale.
+  # Averaged over four seeds rather than read off one. `sigma_mu` carries few
+  # effective draws, so a single chain's ratio ranges over roughly 0.02 to 0.76
+  # in log terms with nothing wrong, which is wider than any threshold that
+  # would still catch the bug. The mean of four is not, and the bug being
+  # guarded against moved the scale by about a factor of four, or 1.39 in the
+  # same units, so there is plenty of room between the noise and the signal.
+  ratios <- vapply(c(61L, 7L, 13L, 29L), function(seed) {
+    d <- sim_x(n = 200, p = 4, seed = seed)
+    d$y <- 2 * d$x1 * d$x2 + stats::rnorm(nrow(d))
+
+    fit <- bartisan(y ~ ., data = d, family = gaussian(),
+                    control = bartisan_control(num_trees = 20, num_burn = 400,
+                                               num_draws = 200, verbose = FALSE,
+                                               sigma_mu_ramp = 0.25))
+
+    sm <- fit[["sigma_mu"]][, 1L]
+    n <- length(sm)
+    early <- mean(sm[seq_len(n %/% 10)])
+    late <- mean(sm[seq.int(n - n %/% 10 + 1L, n)])
+
+    # And the ramp target itself is not where the trace starts.
+    expect_gt(sm[1L], 1.5 * 3 / (2 * sqrt(20)) / 10)
+
+    abs(log(late / early))
+  }, numeric(1L))
+
+  # Not a test of stationarity; a test that the retained draws do not open a
+  # long way below where they end up, which is what the frozen update caused.
+  expect_lt(mean(ratios), log(1.5))
+})
+
+test_that("a ramp spanning the whole of warmup still hands the scale back", {
+  # With `sigma_mu_ramp = 1` there is no post-ramp iteration, so the restore
+  # after the warmup loop is the only thing that puts the scale back. It has to
+  # keep working.
+  d <- sim_x(n = 200, seed = 62)
+  d$y <- 2 * d$x1 + stats::rnorm(nrow(d))
+
+  fit <- bartisan(y ~ ., data = d, family = gaussian(),
+                  control = bartisan_control(num_trees = 20, num_burn = 200,
+                                             num_draws = 200, verbose = FALSE,
+                                             sigma_mu_ramp = 1))
+
+  expect_gt(stats::sd(fit[["sigma_mu"]][, 1L]), 0)
+})
+
+test_that("control arguments can be passed through bartisan()'s dots", {
+  d <- sim_x(seed = 41)
+  d$y <- stats::rnorm(nrow(d))
+
+  # A setting passed in `...` reaches the control list, and the ones passed to
+  # bartisan_control() alongside it survive.
+  fit <- bartisan(y ~ ., data = d, control = quick_control(),
+                  num_trees = 3, gate = "hard")
+
+  expect_identical(fit[["control"]][["num_trees"]], 3L)
+  expect_false(fit[["control"]][["soft"]])
+  expect_identical(fit[["control"]][["num_burn"]], 30L)
+
+  # `...` wins over the same setting given in `control`.
+  fit2 <- bartisan(y ~ ., data = d, control = quick_control(num_trees = 9),
+                   num_trees = 4)
+
+  expect_identical(fit2[["control"]][["num_trees"]], 4L)
+
+  # Passing a setting through `...` is the same call as passing it through
+  # `control`: same draws from the same seed.
+  set.seed(1)
+  a <- bartisan(y ~ ., data = d, control = quick_control(), num_trees = 3,
+                gate = "hard")
+  set.seed(1)
+  b <- bartisan(y ~ ., data = d,
+                control = quick_control(num_trees = 3, gate = "hard"))
+
+  expect_equal(a[["eta"]], b[["eta"]])
+
+  # An argument whose default is NULL is kept when passed explicitly, rather
+  # than being dropped from the merged list.
+  fit3 <- bartisan(y ~ ., data = d, control = quick_control(),
+                   sigma_mu = NULL)
+  expect_null(fit3[["control"]][["sigma_mu"]])
+})
+
+test_that("unknown dots arguments to bartisan() are an error", {
+  d <- sim_x(seed = 42)
+  d$y <- stats::rnorm(nrow(d))
+
+  expect_error(bartisan(y ~ ., data = d, control = quick_control(),
+                       num_tree = 3),
+               "not an argument")
+  expect_error(bartisan(y ~ ., data = d, control = quick_control(),
+                       nonsense = 1, other = 2),
+               "not arguments")
+
+  # Validation still happens in bartisan_control(), rather than being skipped
+  # for settings that arrive this way.
+  expect_error(bartisan(y ~ ., data = d, control = quick_control(),
+                       num_trees = -1),
+               "num_trees")
+})
+
+test_that("`gate` covers both kinds of rule and `sparsity` sets the DART prior", {
+  expect_true(bartisan_control()[["soft"]])
+  expect_identical(bartisan_control()[["gate"]], "smoothstep")
+
+  for (g in c("hard", "step")) {
+    expect_false(bartisan_control(gate = g)[["soft"]])
+  }
+
+  for (g in c("logistic", "smoothstep", "smootherstep")) {
+    expect_true(bartisan_control(gate = g)[["soft"]])
+    expect_identical(bartisan_control(gate = g)[["gate"]], g)
+  }
+
+  # Every rewriting pays under either kind of rule, the negative binomial
+  # included, so `gate` does not change what the default resolves to.
+  expect_true("negbin" %in% bartisan_control(gate = "hard")[["augment"]])
+  expect_true("negbin" %in% bartisan_control()[["augment"]])
+  expect_setequal(bartisan_control()[["augment"]],
+                  bartisan_control(gate = "hard")[["augment"]])
+
+  # The survival rewriting pays under both kinds of rule, so it is on either way.
+  expect_true("aft" %in% bartisan_control()[["augment"]])
+  expect_identical(bartisan_control(augment = FALSE)[["augment"]], character())
+
+  on <- bartisan_control(sparsity = TRUE)
+  off <- bartisan_control(sparsity = FALSE)
+
+  expect_true(on[["update_s"]] && on[["update_alpha"]])
+  expect_false(off[["update_s"]] || off[["update_alpha"]])
+  expect_identical(off[c("update_s", "update_alpha")],
+                   bartisan_control(sparsity = "none")[c("update_s",
+                                                         "update_alpha")])
+  expect_identical(on[["alpha_shape_2"]],
+                   bartisan_control(sparsity = "moderate")[["alpha_shape_2"]])
+
+  # Strength moves the prior on the concentration, and a knob given directly
+  # still wins over the summary argument.
+  expect_gt(bartisan_control(sparsity = "strong")[["alpha_shape_2"]],
+            on[["alpha_shape_2"]])
+  expect_lt(bartisan_control(sparsity = "weak")[["alpha_shape_1"]],
+            bartisan_control(sparsity = "weak", alpha_shape_1 = 2)[["alpha_shape_1"]])
+  expect_true(bartisan_control(sparsity = FALSE, update_s = TRUE)[["update_s"]])
+})
+
+test_that("a tree count per forest is honored, and the leaf scale follows it", {
+  d <- sim_x(n = 200, seed = 61)
+  d$y <- 2 * d$x1 + stats::rnorm(nrow(d), 0, exp(-1 + d$x2))
+
+  fit <- bartisan(y ~ ., d, family = gaussian_ls(),
+                  control = quick_control(num_trees = c(20L, 5L)))
+
+  expect_identical(fit[["num_trees"]], c(20L, 5L))
+
+  # One bandwidth column per tree, the forests laid out back to back.
+  expect_identical(ncol(fit[["bandwidth"]]), 25L)
+
+  # One encoded tree per tree per draw.
+  expect_identical(length(fit[["tree_start"]]),
+                   25L * nrow(fit[["sigma_mu"]]) + 1L)
+
+  # The stored forest replays to the reported predictor, which is what catches an
+  # indexing error in the flat encoding.
+  expect_predictor_invariant(fit, d)
+
+  # A scalar is recycled, and recycling is the same call as saying it twice.
+  set.seed(3)
+  a <- bartisan(y ~ ., d, family = gaussian_ls(),
+                control = quick_control(num_trees = 8L))
+  set.seed(3)
+  b <- bartisan(y ~ ., d, family = gaussian_ls(),
+                control = quick_control(num_trees = c(8L, 8L)))
+
+  expect_equal(a[["eta"]], b[["eta"]])
+
+  # More values than forests is an error rather than a silent truncation. The
+  # message comes from the per-forest resolver, which names the forests it does
+  # have.
+  expect_error(bartisan(y ~ ., d, family = gaussian(),
+                       control = quick_control(num_trees = c(5L, 5L))),
+               "2 values but the model has 1 forest")
+})

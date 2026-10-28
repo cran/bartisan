@@ -1,0 +1,1151 @@
+#' Response families for generalized BART
+#'
+#' @description
+#' [bartisan()] accepts the [`stats::family`] objects used by [stats::glm()], so
+#' `gaussian()`, `binomial("probit")`, `poisson()` and [stats::Gamma()] all work
+#' unchanged. The functions documented here supply the additional families that
+#' have no `glm()` counterpart, in the same style, so that they can be passed to
+#' the `family` argument the same way.
+#'
+#' One caveat carries over from base R: `stats::Gamma()` defaults to
+#' `link = "inverse"`, which is the worst link for this sampler, so write
+#' `Gamma("log")`, or name the family as the string `family = "Gamma"`, which is
+#' this package's own spelling and resolves to the log link; see Details.
+#'
+#' @param cut_alpha `numeric`; for `ordinal()` and `ordbeta()`, the
+#'   concentration of the induced-Dirichlet prior on the cutpoints. Default is 1,
+#'   which says the category probabilities they imply are uniform over the
+#'   simplex; larger values pull them toward equal shares. See Details.
+#' @param link string; the link function. Allowable options include `"logit"`
+#'   (the default), `"probit"`, and `"cloglog"` for `ordinal()` and `Beta()`, and
+#'   `"logit"` (the default) and `"probit"` for `multinomial()`. The remaining
+#'   families take one link each, which is therefore the default: `"log"` for
+#'   `negbin()`, `zi_poisson()`, `zi_negbin()`, and `Gamma_ls()`, `"logit"` for
+#'   `ordbeta()`, and `"identity"` for `gaussian_ls()`. Each family compiles the links for
+#'   which the additive predictor is the natural unconstrained scale; any other
+#'   link is applied from R, for the families where that is well defined. See
+#'   Details.
+#' @param theta `numeric`; for `negbin()` and `zi_negbin()`, a fixed value for
+#'   the dispersion parameter, which must be positive. Default is `NULL` to draw
+#'   it along with everything else.
+#' @param phi `numeric`; for `Beta()` and `ordbeta()`, a fixed value for the beta
+#'   precision, and for `tweedie()` a fixed value for the dispersion. Must be
+#'   positive. Default is `NULL` to draw it.
+#' @param power `numeric`; for `tweedie()`, the variance power \eqn{p} in
+#'   \eqn{\mathrm{Var}(y) = \phi\mu^p}, strictly between 1 and 2. Default is 1.5,
+#'   and the value is held fixed there rather than drawn, because the power is
+#'   weakly identified from data of the sizes this package is used on and a
+#'   badly determined power drags the dispersion around with it. Pass `NULL` to
+#'   draw it, which is worth doing only with a large sample and a real interest
+#'   in the shape rather than the mean.
+#' @param reference for `multinomial()`, the response category to hold as the
+#'   reference, given as a single value naming one of the response's levels.
+#'   Default is `NULL`, which with the logit link fits one forest per category
+#'   instead and leaves the model unidentified, which makes the prior
+#'   symmetric in the categories; see Details. The probit link is always written
+#'   as contrasts against a reference, so there the default is the first level.
+#' @param replicates `numeric`; for `multinomial("probit")`, how many simulation
+#'   draws to use for the category probabilities, which have no closed form.
+#'   Default is 200. More is always better but resulting calculations will take
+#'   longer.
+#' @param num_bins *Advanced.* `numeric`; for `ph()`, how many pieces the
+#'   baseline hazard has, with the edges at evenly spaced quantiles of the
+#'   observed times. Must be 2 or greater. Default is `NULL` to use about the
+#'   cube root of the sample size, which is the order the Freedman-Diaconis rule
+#'   gives for a histogram. This should not need to be set: in simulations the
+#'   estimates were essentially unchanged from 4 bins to 100, and it is here for
+#'   checking that rather than for tuning. See Details.
+#' @param lambda_shape `numeric`; for `ph()`, the shape of the gamma prior on
+#'   each bin's baseline hazard, which must be positive. Its rate is drawn.
+#'   Default is 1.
+#' @param update_lambda `logical`; for `ph()`, whether to draw the baseline
+#'   hazards. Default is `TRUE`; `FALSE` holds them at their prior mean, which is
+#'   for diagnosis rather than analysis.
+#' @param nu,q `numeric`; for `dpm()` and `dpm_aft()`, the degrees of freedom of
+#'   the baseline's inverse-chi-square prior on a component's variance and the
+#'   quantile of that prior placed at a rough estimate of the residual standard
+#'   deviation. Defaults are 10 and .95, which are tighter than BART's own 3 and
+#'   .90 because the mixture covers small errors with extra components rather
+#'   than with one component's left tail.
+#' @param k_s `numeric`; for `dpm()` and `dpm_aft()`, how many units of the
+#'   baseline's own scale the component means are allowed to reach out to. Must
+#'   be positive. Default is 10, which places the marginal of a component mean so
+#'   that it reaches the largest residual of a linear fit.
+#' @param alpha `numeric`; for `dpm()` and `dpm_aft()`, a fixed Dirichlet process
+#'   concentration, which must be positive. Default is `NULL` to draw it.
+#' @param max_clusters,psi `numeric`; for `dpm()` and `dpm_aft()`, the largest
+#'   number of mixture components thought plausible (2 or greater) and the shape
+#'   of the taper toward it, which together set the prior on `alpha`. Defaults
+#'   are `NULL` to use a tenth of the sample size, and .5.
+#'
+#' @returns
+#' A `<bartisan_family>` object, which is a list containing at least the elements
+#' `family` and `link` and which inherits from `family`, so that [bartisan()]
+#' recognizes it wherever it recognizes an ordinary [`stats::family`] object.
+#'
+#' @details
+#' Every family reduces to a scalar additive predictor, or to several of them,
+#' together with the first two derivatives of the log density with respect to
+#' each. That is the whole interface the sampler needs, which is why the set of
+#' available families is not restricted to the conditionally conjugate ones.
+#'
+#' `vignette("families", package = "bartisan")` covers all of this at length: how
+#' to choose a family, how to choose among the links a family offers, and what
+#' each family is and is not for. What follows is the short version, and the
+#' points that could lead to output being misread.
+#'
+#' The supported families and links are:
+#'
+#' | Family | Links | Additive predictors | Drawn nuisance parameters |
+#' |---|---|---|---|
+#' | `gaussian()` | `identity` | 1 | residual standard deviation |
+#' | `binomial()` | `logit`, `probit`, `cloglog` | 1 | none |
+#' | `poisson()` | `log` | 1 | none |
+#' | `negbin()` | `log` | 1 | dispersion |
+#' | `Gamma("log")` | `log`; any other link is ignored | 1 | shape |
+#' | `ordinal()` | `logit`, `probit`, `cloglog` | 1 | cutpoints |
+#' | `multinomial()` | `logit`, `probit` | one per category, or per non-reference level | latent covariance, for the probit link |
+#' | `weibull_aft()`, `loglogistic_aft()`, `lognormal_aft()` | none | 1 | scale |
+#' | `ph()` | none | 1 | baseline hazard per bin |
+#' | `dpm_aft()` | none | 1 | error mixture, concentration |
+#' | `gaussian_ls()` | `identity` | 2 | none |
+#' | `Gamma_ls()` | `log` | 2 | none |
+#' | `zi_poisson()` | `log` | 2 | none |
+#' | `zi_negbin()` | `log` | 2 | dispersion |
+#' | `Beta()` | `logit`, `probit`, `cloglog` | 1 | precision |
+#' | `ordbeta()` | `logit` | 1 | 2 cutpoints, precision |
+#' | `tweedie()` | `log` | 1 | dispersion, and the power if it is drawn |
+#' | `dpm()` | `identity` | 1 | error mixture, concentration |
+#'
+#' A family with more than one additive predictor fits one forest per predictor.
+#' Nuisance parameters are drawn alongside the trees and reported in `fit$aux`.
+#'
+#' ## Setting `link`
+#'
+#' The links listed above are the ones the sampler evaluates in compiled code.
+#' Any other link is accepted for `gaussian()`, `binomial()`, `poisson()` and
+#' `Beta()`, and applied from R by composing the caller's inverse link with the
+#' family's own, with the chain rule carrying the derivatives back. So
+#' `binomial("cauchit")` works, as does any link object of the kind
+#' [stats::make.link()] returns. It costs a call into R for every leaf the
+#' sampler visits, and the leaf prior scale is calibrated for the compiled link.
+#'
+#' Some single-predictor families are exceptions. `negbin()` takes `"log"` alone,
+#' so a link given to it is an error rather than a composition. [stats::Gamma()]
+#' accepts any link and fits none of them but `"log"`: every other link is
+#' dropped with a message, because the ones base R offers have inverses that go
+#' non-positive over part of the line and the additive predictor is
+#' unconstrained. `custom_family()` is the route to a gamma response on another
+#' link.
+#'
+#' A composed link whose inverse has a restricted range (`poisson("identity")`,
+#' `poisson("sqrt")`) will give non-finite densities for some predictors. Those
+#' proposals are rejected rather than breaking the chain, but they are wasted
+#' work and the fit is worse for it, so `bartisan()` says so when it starts.
+#' Prefer links whose inverse is defined on the whole line.
+#'
+#' The families with more than one additive predictor, or whose link enters
+#' somewhere other than a single mean (`ordinal()`, `multinomial()`, the
+#' accelerated failure time families, `gaussian_ls()`, the zero-inflated
+#' families and `ordbeta()`), take only their listed links. `custom_family()` is
+#' the way to reach anything else.
+#'
+#' ## Omitting `family`
+#'
+#' The `family` argument may be omitted, in which case it is read off the response's type and
+#' the choice reported with a message; [bartisan()] tabulates the lookup, since
+#' it is the function that takes the `family` argument. A count is read as `gaussian()` rather than
+#' `poisson()`, and a numeric response taking two values other than 0 and 1 as
+#' `gaussian()` rather than `binomial()`, both being modeling decisions rather
+#' than readings of the response's type.
+#'
+#' ## Reading the Output
+#'
+#' `ordinal()` accepts a numeric response as well as an ordered factor, taking
+#' its sorted unique values as the categories, and that is a method rather than
+#' a fallback: the cutpoints absorb the marginal distribution of the response
+#' and the forest explains only the ordering, so nothing is assumed about the
+#' error distribution and the model for \eqn{P(Y \le y \mid x)} is invariant to
+#' any monotone transformation of the response. Predict with
+#' `type = "mean"`. Bin the response onto twenty-odd quantiles first, since one
+#' cutpoint per distinct value is both far slower and slightly less accurate than
+#' twenty-five bins; `vignette("families")` works it through.
+#'
+#' The cutpoints of `ordinal()` and `ordbeta()` carry an induced-Dirichlet prior,
+#' which puts the prior on the category probabilities the cutpoints imply rather
+#' than on the cutpoints themselves. The `cut_alpha` argument is its concentration, and it
+#' regularizes a thinly observed category without disturbing a well observed one.
+#'
+#' A level of an ordered factor that nobody selected is kept rather than dropped,
+#' so a rating scale with an unused point is fitted on all of its points. A
+#' numeric response is read as the distinct values it takes, so such a scale has
+#' to be given as an ordered factor for the unused point to be modeled, and a
+#' warning says so. `vignette("families")` derives the prior and works both
+#' through.
+#'
+#' `ordinal()` uses the cumulative-link parameterization of \pkgfun{MASS}{polr},
+#' in which \eqn{P(Y \le k) = F(c_k - \eta)}, so larger values of the additive
+#' predictor shift mass toward higher categories. Only the differences
+#' \eqn{c_k - \eta_i} are identified, so one location has to be pinned: with three
+#' or more categories the draws are reported in the chart where the additive
+#' predictor has mean zero over the fitted sample and every cutpoint is free,
+#' which is the chart `polr()` reports in when its predictors are centered. With
+#' exactly two categories the single boundary is folded into the intercept
+#' instead, so a two-category response is exactly binary regression with the
+#' matching link and on the same scale. `cut1` is therefore a free parameter
+#' rather than a constant zero, which is a change from earlier versions.
+#'
+#' `multinomial()` by default fits one forest per category and leaves the model
+#' unidentified, since adding any function of the predictors to every category's
+#' forest leaves the probabilities alone. The point of that parameterization is
+#' that the prior is then symmetric in the categories, and every identified
+#' quantity is recovered from the draws. Passing `reference`
+#' instead pins that category at zero and fits one fewer forest, giving log odds
+#' against it.
+#'
+#' `multinomial("probit")` lets the latent utilities correlate, which a
+#' multinomial logit cannot express at all. \eqn{\Sigma} is normalized by the
+#' trace constraint \eqn{\mathrm{tr}(\Sigma) = C}, and its lower triangle appears
+#' in `fit$aux` as `sigma11`, `sigma21` and so on. Read the fitted probabilities
+#' rather than the covariance: the correlations enter the likelihood only through
+#' orthant probabilities of a distribution whose location is a sum of trees, so a
+#' flexible mean absorbs much of the dependence they are meant to measure and
+#' they are weakly identified until the sample is large. The likelihood has no
+#' closed form, so it and every category probability are simulated with
+#' `replicates` draws, and the `augment` argument does not apply, the latent variables being
+#' the model rather than a rewriting of it.
+#'
+#' `dpm()` is not a distribution but a way of not choosing one. It is DPMBART: a
+#' numeric response with the sum of trees for its mean, as
+#' `gaussian()` has, and a Dirichlet process mixture of normals for its errors
+#' instead of a single normal, so the error distribution comes out as whatever
+#' mixture the data ask for. [error_density()] gives that density, which is the
+#' object the method exists to produce.
+#'
+#' It is the family to reach for by default on a numeric response, because it
+#' does not pay for its flexibility: on normal errors, where `gaussian()` is
+#' exactly right, it came out slightly ahead on both held-out error and log score
+#' at the same time to one decimal place, and on heavy-tailed, skewed and bimodal
+#' errors it was ahead by a great deal (on bimodal errors at a thousand
+#' observations, 0.050 against 0.154 in held-out RMSE, a factor of three, at the
+#' same time to a tenth of a second). So it is the family a numeric response gets
+#' when none is named. The reasons to prefer `gaussian()` are not statistical:
+#' it takes prior weights, which `dpm()` refuses, and it reports one
+#' interpretable `sigma` where `dpm()` has a mixture. It is also faster, by 1.4
+#' times at a thousand observations. The vignette has the comparison.
+#'
+#' Some properties of `dpm()` itself are worth knowing. It does not buy
+#' heteroskedasticity: the error distribution is flexible but it is the same
+#' distribution at every \eqn{x}, and `gaussian_ls()` is the family for a
+#' spread that depends on the predictors. And the additive predictor is the
+#' conditional mean, as it is for `gaussian()`: nothing in the model forces the
+#' mixture to be centered, so the sampler works in a chart where only the sum of
+#' the predictor and the error mean is identified, but reporting is done in the
+#' chart where the mixture has mean zero and the whole conditional mean sits on
+#' the predictor. `type = "link"` and `type = "response"` therefore agree
+#' exactly, and `fit$aux` reports the shift that was taken out as `center` rather
+#' than an error mean, which is zero by construction. Prior weights are refused,
+#' since a weight would have to be a multiplicity in the Dirichlet process.
+#'
+#' The gamma family puts the forest on the log mean and draws the shape, which
+#' acts as the inverse dispersion; it does *not* regress the shape on the
+#' predictors. `negbin()` and `ordbeta()` take `theta` and `phi` to fix their
+#' equivalents, and the gamma shape has no such argument because a caller who
+#' knows it is rare. The link is where the care is needed. Only `log` is
+#' compiled, and the base R default of `inverse` is the worst case for this
+#' sampler: its inverse maps a negative predictor to a negative mean, whose log
+#' is not a number, so the proposal is rejected, dozens of times per fit, and the
+#' fit is both slower and slightly worse for it. So write the link, or name the
+#' family as the string `"Gamma"`, which resolves to the log link; base R's own
+#' function is left as base R defines it, so that attaching \pkg{bartisan} cannot
+#' change what `glm()` does. Any composed link whose inverse has a restricted
+#' range is reported when the fit starts.
+#'
+#' The accelerated failure time families expect a right-censored response,
+#' supplied either as a \pkgfun{survival}{Surv} object or as a two-column matrix
+#' of times and event indicators. They model \eqn{\log T = \eta + \sigma\epsilon}
+#' with \eqn{\epsilon} a standard smallest extreme value, logistic or normal
+#' variate respectively, giving
+#' Weibull, log-logistic and log-normal survival times.
+#'
+#' A contrast in the predictor is a log time ratio in all of them, and in
+#' `dpm_aft()` too, because with \eqn{\epsilon} independent of \eqn{x} every
+#' quantile and both means of \eqn{T} scale by \eqn{e^{\Delta\eta}} whatever
+#' shape the error has. The families differ in what \eqn{e^{\eta}} is on its own, each
+#' family pinning its error's location differently: the median of \eqn{T} for
+#' `loglogistic_aft()` and `lognormal_aft()`, the geometric mean for `dpm_aft()`,
+#' and the Weibull scale for `weibull_aft()`. Contrasts are unaffected by any of
+#' that; `vignette("survival")` tabulates the levels.
+#'
+#' `weibull_aft()` is also the one family whose predictor carries a log *hazard*
+#' ratio, of \eqn{-\Delta\eta/\sigma}, alongside its log time ratio. That is a
+#' property of the smallest extreme value error rather than of the structural part it shares with
+#' the other three: it is the only error making an accelerated failure time model
+#' a proportional hazards model as well.
+#'
+#' `ph()` is the proportional hazards alternative, with a piecewise-constant
+#' baseline: \eqn{\lambda(t \mid x) = \lambda_0(t)\exp(r(x))}, so its predictor
+#' is a log *hazard* ratio and the baseline is free to take any shape rather than
+#' the monotone one a Weibull imposes. The `num_bins` argument sets how many pieces, with the
+#' edges at evenly spaced quantiles of the observed times; the default is about
+#' the cube root of the sample size. The bin hazards are drawn from their exact
+#' gamma conditionals and reported as `lambda1`, `lambda2`, ... in `fit$aux`,
+#' together with the rate of their own prior. The predictor and the baseline are
+#' identified only jointly, so each draw is reported with the predictor centered
+#' over the fitted sample and the hazards scaled to match: a single value of the
+#' predictor is a log hazard ratio against a unit whose predictor sits at that
+#' average, and `lambda1`, `lambda2`, ... are that unit's hazards. Setting
+#' `update_lambda = FALSE` holds the baseline fixed, in which case the draws are
+#' reported uncentered and the hazards at the values they were fixed at.
+#'
+#' Cox's *partial* likelihood cannot be used here: it couples
+#' observations through risk sets and so does not decompose into a sum over the
+#' observations reaching a leaf. The full likelihood of the piecewise-exponential
+#' model does decompose, and it approaches the partial likelihood as the bins
+#' shrink, which is how `ph()` reaches proportional hazards without it.
+#'
+#' The `num_bins` argument should be left at its default. The estimates are insensitive to it,
+#' and what it does change is the effective number of parameters, which grows
+#' with the bin count and so matters for [`loo()`][bartisan-interop] and `waic()`.
+#' In the simulations `vignette("survival")` summarizes, the fitted survival
+#' curves were essentially unchanged from 4 bins to 100.
+#'
+#' The three differ in cost, though not enough to decide a model on.
+#' `lognormal_aft()` and `loglogistic_aft()` impute each censored failure time
+#' above its censoring time, which makes their targets quadratic and is worth a
+#' large multiple of the speed; `weibull_aft()` needs no imputation because its
+#' likelihood already has a form the sampler can collapse to a single pass, but
+#' only under hard rules, which makes it the slowest of the three at the default
+#' gate.
+#'
+#' `dpm_aft()` is the accelerated failure time model with the error distribution
+#' estimated rather than assumed: \eqn{\log T = m(x) + W} with \eqn{W} a
+#' Dirichlet process mixture of normals constrained to mean zero, and censored
+#' log-times imputed. It is `dpm()`'s error model with censoring, so its predictor
+#' is the conditional mean of \eqn{\log T} and a contrast in it is a log time
+#' ratio exactly as for the three parametric families above, `error_density()`
+#' reports the fitted error density, and prior weights are refused for the same
+#' reason `dpm()` refuses them.
+#'
+#' Reach for it when the shape of the error is in doubt and there is no reason to
+#' assert one. It gains substantially where a fixed-error family would have been
+#' wrong and costs next to nothing where one would have been right, which is the
+#' property `dpm()` has against `gaussian()`; `vignette("survival")` summarizes
+#' the simulations behind that.
+#'
+#' `gaussian_ls()` regresses the mean and the log standard deviation of a
+#' normal response on separate forests, so the variance is an unrestricted
+#' function of the predictors.
+#'
+#' `Gamma_ls()` does the same for a gamma response: the first forest is the log
+#' mean, exactly as `Gamma("log")`'s is, and the second is the log dispersion, so
+#' the shape is `exp(-log_dispersion)` at each observation rather than one value
+#' drawn for the whole sample. It relaxes the assumption that the
+#' coefficient of variation is constant, which a gamma with a single
+#' shape asserts, and giving its second forest an intercept-only formula puts
+#' that assumption back; see "Several additive predictors" above.
+#'
+#' Note that the mean forest is quadratic in neither family, but it takes the
+#' same cheap exponential form `Gamma("log")`'s does, while the dispersion forest
+#' takes the general path, so the cost sits in the second forest and it is worth
+#' giving that one fewer trees.
+#'
+#' `zi_poisson()` and `zi_negbin()` are zero-inflated counts. Both parts get their
+#' own forest: the first predictor is the log mean of the count component and the
+#' second the log odds that an observation is a structural zero, so the
+#' excess-zero mechanism is free to depend on the predictors. The two are
+#' reported as the `count` and `zero` predictors.
+#'
+#' `Beta()` is beta regression for a response strictly inside the unit interval:
+#' a forest on the link of the mean, and a precision drawn alongside it. A
+#' response *at* either endpoint has no beta density, so it is an error rather
+#' than something to nudge inward.
+#'
+#' `ordbeta()` is ordered beta regression, for a response on
+#' the closed unit interval with point masses at zero and one. One predictor
+#' drives both the probability of landing on an endpoint, through a pair of
+#' cutpoints as in an ordinal model, and the mean of the beta density in between.
+#' Because the predictor also enters the beta mean it is identified, so unlike
+#' `ordinal()` both cutpoints are drawn.
+#'
+#' Choose between them on whether the response can reach a boundary, not on
+#' whether it happens to in the sample: the two ask different questions, and
+#' `ordbeta()` fitted to a response with no boundary observations leaves its
+#' cutpoints with nothing to identify them.
+#'
+#' `tweedie()` is the compound Poisson-gamma, for a non-negative response with a
+#' point mass at zero and a continuous positive part, which is the shape of
+#' spending, rainfall, insurance claims and earnings. It is the analogue of
+#' `ordbeta()` at the other end: one predictor again drives both parts, but
+#' through the mean rather than through a cutpoint, since \eqn{\mu = \exp(\eta)}
+#' and \eqn{\mathrm{Var}(y) = \phi\mu^p} together fix the probability of a zero
+#' at \eqn{\exp(-\mu^{2-p}/(\phi(2-p)))}. That makes it a single process
+#' and is also its restriction: the share of zeros has no level of its own, so a
+#' response whose zeros are more or less common than its mean implies wants a
+#' two-part model instead, which `zi_poisson()` and `zi_negbin()` are for counts
+#' and which `custom_family()` can supply for anything else.
+#'
+#' Because the mean is exactly \eqn{\exp(\eta)}, a counterfactual mean through
+#' \CRANpkg{marginaleffects} needs nothing beyond the
+#' forest, unlike a two-part model where it has to be recombined across
+#' predictors; and the fit is comparable with a `poisson()` or `Gamma("log")` fit
+#' of the same response, since all three put the same quantity on the same
+#' scale.
+#'
+#' ## Several Additive Predictors
+#'
+#' Most families model one parameter with one forest. Some model several, and
+#' then every argument that could mean something different for each of them may
+#' be given per forest, keyed by the names below or positionally;
+#' [bartisan_control()] states the recycling rule and lists which arguments it
+#' covers, and the `formula` argument is among them, so a forest can have predictors of its
+#' own.
+#'
+#' The first forest is always the main parameter, the one a single-forest family
+#' would have on its own. This table is the canonical list of the names, which
+#' `vignette("families")` reproduces:
+#'
+#' | Family | Forests, in order |
+#' | --- | --- |
+#' | `gaussian_ls()` | `mean`, `log_sd` |
+#' | `Gamma_ls()` | `mean`, `log_dispersion` |
+#' | `zi_poisson()`, `zi_negbin()` | `count`, `zero` |
+#' | `custom_family(num_predictors = k)` | `eta1` ... `etak` |
+#' | `multinomial("logit")` | one per level, or per non-reference level |
+#' | `multinomial("probit")` | one per non-reference level, named for its contrast |
+#' | everything else | `eta` |
+#'
+#' `mean` is the mean and `log_sd` is the logarithm of the standard deviation,
+#' which is the scale the forest works on. `Gamma_ls()`'s `mean` is the log mean,
+#' as `Gamma("log")`'s single forest is, and its `log_dispersion` is the
+#' logarithm of the dispersion, so that in both location-scale families a larger
+#' second predictor means more spread. `count` is the linear predictor of the
+#' count component and `zero` that of the inflation component. A custom family's
+#' nuisance parameters are not on this list: they are carried as trailing forests
+#' pinned to a single leaf, and nothing about them is set per forest.
+#'
+#' A forest whose formula names no predictor is a constant. `~ 1` leaves that
+#' forest nothing to split on, so every tree in it is a stump and the parameter is
+#' one drawn scalar. Every family here that takes more than one formula accepts
+#' that, which makes the distinction between a nuisance parameter and an
+#' empty forest a thin one: `gaussian_ls()` with `~ 1` on its scale is
+#' `gaussian()`, `Gamma_ls()` with `~ 1` is `Gamma("log")`, and `zi_poisson()`
+#' with `~ 1` on its inflation part is the zero-inflated Poisson with a single
+#' structural-zero probability. Note that the scalar is drawn under the leaf prior
+#' rather than under the prior the corresponding built-in family puts on its
+#' nuisance parameter, so the two agree closely rather than exactly. The
+#' multinomial families are the exception, for the reason given below.
+#'
+#' So, for a location-scale model with a smaller scale forest and a restricted
+#' set of predictors for it:
+#'
+#' ```r
+#' bartisan(list(y ~ x1 + x2 + x3, log_sd = ~ x1), data = d,
+#'          family = gaussian_ls(), num_trees = c(mean = 50, log_sd = 10))
+#' ```
+#'
+#' The multinomial families are the exception. Their forests are the levels of
+#' one categorical parameter and act together rather than describing separate
+#' components of the response distribution, so there is nothing a caller could
+#' mean by giving one level a different prior or a different set of predictors
+#' from another. Every argument applies to all of their forests at once, and more
+#' than one value is an error rather than a silent recycling.
+#'
+#' ## Supplying a Likelihood
+#'
+#' When none of the families above is the right one, [custom_family()] takes the
+#' log density itself, as an R function, and fits the model that goes with it.
+#' Its page has the details, including what a log density cannot supply: a
+#' posterior predictive distribution and a fitted mean.
+#'
+#' @seealso
+#' [bartisan()] for fitting a model with one of these families;
+#' [custom_family()] for a likelihood none of them covers;
+#' [error_density()] for the error distribution a `dpm()` or `dpm_aft()` fit
+#' estimates; `vignette("families", package = "bartisan")` for the long form
+#'
+#' @examples
+#' data("rhc")
+#' set.seed(123)
+#'
+#' # A right-censored response, given as the time and the
+#' # event indicator, with the error distribution estimated
+#' # rather than assumed
+#' surv_model <- cbind(days, death) ~ rhc + age + sex +
+#'   race + edu + aps + meanbp + resp + hema + pafi +
+#'   paco2 + crea + surv2m + card
+#'
+#' fit <- bartisan(surv_model, data = rhc,
+#'                 family = dpm_aft(), num_trees = 10,
+#'                 num_burn = 50, num_draws = 50)
+#'
+#' # The shape the errors came out
+#' head(error_density(fit))
+#'
+#' # The same response under proportional hazards, whose
+#' # predictor is a log hazard ratio and whose baseline is
+#' # free to take any shape
+#' bartisan(surv_model, data = rhc, family = ph(),
+#'          num_trees = 10, num_burn = 50, num_draws = 50)
+#'
+#' # An unordered response, with one forest per category
+#' # and a prior that is symmetric in them
+#' bartisan(race ~ rhc + age + sex + edu + aps + meanbp +
+#'            resp + hema + pafi + paco2 + crea + surv2m +
+#'            card,
+#'          data = rhc, family = multinomial(),
+#'          num_trees = 10, num_burn = 50, num_draws = 50)
+#'
+#' # A link the engine does not compile, applied from R
+#' bartisan(death ~ rhc + age + sex + race + edu + aps +
+#'            meanbp + resp + hema + pafi + paco2 + crea +
+#'            surv2m + card,
+#'          data = rhc, family = binomial("cauchit"),
+#'          num_trees = 10, num_burn = 50, num_draws = 50)
+#'
+#' @name bartisan-families
+NULL
+
+#' @rdname bartisan-families
+#' @export
+negbin <- function(link = "log", theta = NULL) {
+  link <- arg::match_arg(link, "log")
+
+  arg::when_not_null(
+    theta,
+    arg::arg_and(
+      arg::arg_number,
+      arg::arg_gt(0)
+    )
+  )
+
+  new_bartisan_family("negbin", link, theta = theta)
+}
+
+# `family = "Gamma"` resolves through here, which is why this exists and why it
+# is not exported: `stats::Gamma()` defaults to the inverse link, which is the
+# worst link for this sampler, and masking a base R family to change that default
+# would change `glm()` too. Naming the family as a string is the one route this
+# package owns outright, so that is the route that gets the better default.
+# `stats::Gamma()` and `Gamma("inverse")` behave exactly as they always did, and
+# the message from `warn_restricted_link()` says what the inverse link costs.
+gamma_string_family <- function() {
+  stats::Gamma(link = "log")
+}
+
+#' @rdname bartisan-families
+#' @export
+ordinal <- function(link = "logit", cut_alpha = 1) {
+  link <- arg::match_arg(link, c("logit", "probit", "cloglog"))
+
+  arg::arg_number(cut_alpha)
+  arg::arg_gte(cut_alpha, 0)
+
+  out <- new_bartisan_family("ordinal", link)
+  out[["cut_alpha"]] <- cut_alpha
+  out
+}
+
+#' @rdname bartisan-families
+#' @export
+multinomial <- function(link = "logit", reference = NULL,
+                        replicates = 200L) {
+  link <- arg::match_arg(link, c("logit", "probit"))
+
+  if (!is_null(reference)) {
+    if (length(reference) != 1L || is.na(reference)) {
+      arg::err("{.arg reference} must be a single response category")
+    }
+
+    reference <- as.character(reference)
+  }
+
+  # The two links are different enough inside the engine to be separate
+  # families -- the probit one carries a covariance matrix and has one fewer
+  # forest under the same coding -- but they are one model to the caller, so
+  # they are one function with a link argument, as `binomial()` and `ordinal()`
+  # are.
+  if (identical(link, "logit")) {
+    return(new_bartisan_family("multinomial", link, reference = reference))
+  }
+
+  arg::arg_count(replicates)
+  arg::arg_gte(replicates, 1)
+
+  new_bartisan_family("mnp", link, reference = reference,
+                      replicates = as.integer(replicates))
+}
+
+#' @rdname bartisan-families
+#' @export
+dpm_aft <- function(nu = 10, q = 0.95, k_s = 10, alpha = NULL,
+                    max_clusters = NULL, psi = 0.5) {
+  out <- dpm(nu = nu, q = q, k_s = k_s, alpha = alpha,
+             max_clusters = max_clusters, psi = psi)
+  out[["family"]] <- "dpm_aft"
+  out
+}
+
+#' @rdname bartisan-families
+#' @export
+dpm <- function(nu = 10, q = 0.95, k_s = 10, alpha = NULL,
+                max_clusters = NULL, psi = 0.5) {
+  arg::arg_number(nu)
+  arg::arg_gt(nu, 0)
+  arg::arg_number(q)
+  arg::arg_between(q, c(0, 1))
+  arg::arg_number(k_s)
+  arg::arg_gt(k_s, 0)
+  arg::arg_number(psi)
+  arg::arg_gte(psi, 0)
+
+  arg::when_not_null(
+    alpha,
+    arg::arg_and(
+      arg::arg_number,
+      arg::arg_gt(0)
+    )
+  )
+
+  arg::when_not_null(
+    max_clusters,
+    arg::arg_and(
+      arg::arg_count,
+      arg::arg_gte(2)
+    )
+  )
+
+  new_bartisan_family("dpm", "identity", nu = nu, q = q, k_s = k_s,
+                      alpha = alpha, max_clusters = max_clusters, psi = psi)
+}
+
+#' @rdname bartisan-families
+#' @export
+weibull_aft <- function() {
+  new_bartisan_family("aft", "weibull")
+}
+
+#' @rdname bartisan-families
+#' @export
+loglogistic_aft <- function() {
+  new_bartisan_family("aft", "loglogistic")
+}
+
+#' @rdname bartisan-families
+#' @export
+lognormal_aft <- function() {
+  new_bartisan_family("aft", "lognormal")
+}
+
+#' @rdname bartisan-families
+#' @export
+ph <- function(num_bins = NULL, lambda_shape = 1, update_lambda = TRUE) {
+  arg::when_not_null(
+    num_bins,
+    arg::arg_and(
+      arg::arg_whole_number,
+      arg::arg_gte(2)
+    )
+  )
+
+  arg::arg_number(lambda_shape)
+  arg::arg_gt(lambda_shape, 0)
+  arg::arg_flag(update_lambda)
+
+  new_bartisan_family("ph", "log",
+                      num_bins = if (is_null(num_bins)) NULL
+                      else as.integer(num_bins),
+                      lambda_shape = lambda_shape,
+                      update_lambda = update_lambda)
+}
+
+#' @rdname bartisan-families
+#' @export
+gaussian_ls <- function(link = "identity") {
+  link <- arg::match_arg(link, "identity")
+
+  new_bartisan_family("gaussian_ls", link)
+}
+
+#' @rdname bartisan-families
+#' @export
+Gamma_ls <- function(link = "log") {
+  link <- arg::match_arg(link, "log")
+
+  new_bartisan_family("Gamma_ls", link)
+}
+
+#' @rdname bartisan-families
+#' @export
+zi_poisson <- function(link = "log") {
+  link <- arg::match_arg(link, "log")
+
+  new_bartisan_family("zip", link)
+}
+
+#' @rdname bartisan-families
+#' @export
+zi_negbin <- function(link = "log", theta = NULL) {
+  link <- arg::match_arg(link, "log")
+
+  arg::when_not_null(
+    theta,
+    arg::arg_and(
+      arg::arg_number,
+      arg::arg_gt(0)
+    )
+  )
+
+  new_bartisan_family("zinb", link, theta = theta)
+}
+
+#' @rdname bartisan-families
+#' @export
+Beta <- function(link = "logit", phi = NULL) {
+  # Only the logit link is compiled; `probit` and `cloglog` are reached by
+  # composition, the way an uncompiled link is for any other family, so they are
+  # not listed here and are validated by `as_bartisan_family()` instead.
+  arg::arg_string(link)
+
+  arg::when_not_null(
+    phi,
+    arg::arg_and(
+      arg::arg_number,
+      arg::arg_gt(0)
+    )
+  )
+
+  new_bartisan_family("beta", link, phi = phi)
+}
+
+#' @rdname bartisan-families
+#' @export
+ordbeta <- function(link = "logit", phi = NULL, cut_alpha = 1) {
+  link <- arg::match_arg(link, "logit")
+
+  arg::when_not_null(
+    phi,
+    arg::arg_and(
+      arg::arg_number,
+      arg::arg_gt(0)
+    )
+  )
+
+  arg::arg_number(cut_alpha)
+  arg::arg_gte(cut_alpha, 0)
+
+  out <- new_bartisan_family("ordbeta", link, phi = phi)
+  out[["cut_alpha"]] <- cut_alpha
+  out
+}
+
+#' @rdname bartisan-families
+#' @export
+tweedie <- function(link = "log", power = 1.5, phi = NULL) {
+  link <- arg::match_arg(link, "log")
+
+  # The open interval, since the family degenerates at both ends: to a Poisson
+  # multiple at 1 and to a gamma with no mass at zero at 2. The interior is all
+  # usable, which is worth knowing because the series that normalizes the
+  # density has a shape parameter of (2 - p) / (p - 1) and that runs from 999 at
+  # p = 1.001 to 0.001 at p = 1.999. Measured across that whole range, every
+  # density is finite and a fit runs. `NULL` is the request to draw the power,
+  # so it is not a value to be checked.
+  arg::when_not_null(
+    power,
+    arg::arg_and(
+      arg::arg_number,
+      arg::arg_between(c(1, 2), inclusive = FALSE)
+    )
+  )
+
+  arg::when_not_null(
+    phi,
+    arg::arg_and(
+      arg::arg_number,
+      arg::arg_gt(0)
+    )
+  )
+
+  new_bartisan_family("tweedie", link, power = power, phi = phi)
+}
+
+# The options a family of ours would have been built with, for a caller who
+# named the distribution through a plain `family` object instead. Only the
+# families whose defaults are something other than "draw it" need an entry, so
+# the list is short and stays that way.
+family_defaults <- function(name) {
+  if (!identical(name, "tweedie")) {
+    return(list())
+  }
+
+  built <- tweedie()
+  built[!names(built) %in% c("family", "link")]
+}
+
+bartisan_family_names <- c("gaussian", "binomial", "poisson", "negbin", "Gamma",
+                           "ordinal", "multinomial", "dpm",
+                           "weibull_aft", "loglogistic_aft", "lognormal_aft",
+                           "gaussian_ls", "Gamma_ls", "zi_poisson", "zi_negbin",
+                           "Beta", "ordbeta", "tweedie", "ph", "dpm_aft")
+
+new_bartisan_family <- function(family, link, ...) {
+  structure(c(list(family = family, link = link), list(...)),
+            class = c("bartisan_family", "family"))
+}
+
+# The scale each engine family's additive predictor natively lives on. A link
+# the engine does not carry is handled by composing the caller's inverse link
+# with the link named here, which is why only families with a single mean and a
+# conventional link can take an arbitrary one.
+native_links <- c(gaussian = "identity", binomial = "logit", poisson = "log",
+                  negbin = "log", beta = "logit")
+
+valid_links <- list(custom = "identity",
+                    gaussian = "identity",
+                    dpm = "identity",
+                    dpm_aft = "identity",
+                    binomial = c("logit", "probit", "cloglog"),
+                    poisson = "log",
+                    negbin = "log",
+                    Gamma = "log",
+                    ordinal = c("logit", "probit", "cloglog"),
+                    multinomial = "logit",
+                    mnp = "probit",
+                    aft = c("weibull", "loglogistic", "lognormal"),
+                    ph = "log",
+                    gaussian_ls = "identity",
+                    Gamma_ls = "log",
+                    zip = "log",
+                    zinb = "log",
+                    beta = "logit",
+                    ordbeta = "logit",
+                    tweedie = "log")
+
+survival_families <- c("dpm_aft", "weibull_aft", "loglogistic_aft", "lognormal_aft", "ph")
+
+# Normalize whatever the user passed to `family` into a bartisan family object.
+# Accepts a string, a family-generating function, a stats::family object, or one
+# of the bartisan families above, mirroring how glm() resolves the argument.
+# The family to use when the caller does not name one, read off the shape of the
+# response the way `glm()` reads off nothing and `lm()` assumes everything. The
+# rules are the ones that have a single obvious answer; anything else is Gaussian,
+# which is the assumption a caller who did not think about it is making anyway.
+#
+# Deliberately *not* inferred: a count. A non-negative integer response is often
+# Poisson and often not, and `poisson()` carries a variance assumption strong
+# enough that guessing it would be a substantive modeling decision made
+# silently. Gaussian is the weaker guess and the one that is easy to see is
+# wrong.
+default_family <- function(y, weights = NULL) {
+  chosen <- {
+    if (inherits(y, "Surv") || is_survival_matrix(y)) {
+      "dpm_aft"
+    }
+    else if (is.ordered(y)) {
+      "ordinal"
+    }
+    else if (is_binary(y)) {
+      "binomial"
+    }
+    else if (is.factor(y) || is.character(y)) {
+      "multinomial"
+    }
+    else if (is.matrix(y) && ncol(y) == 2L) {
+      # Successes and failures, which is one of the shapes glm() accepts.
+      "binomial"
+    }
+    else {
+      "dpm"
+    }
+  }
+
+  # Neither `dpm()` nor `dpm_aft()` can take prior weights, and quietly dropping
+  # them or quietly swapping the family would each be worse than saying so: the
+  # caller asked for weights and has not asked for a family, and only they can
+  # say which of the two they meant.
+  if (!is_null(weights)) {
+    if (identical(chosen, "dpm")) {
+      arg::err(c("A numeric response defaults to {.fn dpm}, which does not take
+                  prior weights.",
+                 i = "Name a family: {.code family = gaussian()} keeps the
+                      weights, and so do {.fn ordinal} and {.fn gaussian_ls}."))
+    }
+
+    if (identical(chosen, "dpm_aft")) {
+      arg::err(c("A censored response defaults to {.fn dpm_aft}, which does not
+                  take prior weights.",
+                 i = "Name a family: {.code family = lognormal_aft()} keeps the
+                      weights, and so do {.fn weibull_aft}, {.fn loglogistic_aft} and {.fn ph}."))
+    }
+  }
+
+  arg::msg(c(i = "Using {.code family = {chosen}()}.",
+             i = "Set {.arg family} explicitly to silence this message."))
+
+  chosen
+}
+
+# Two levels, or numeric zeros and ones -- the responses for which a binomial
+# model is the only sensible reading. A numeric response with two values that
+# are not zero and one is left to the numeric default, `dpm()`, since treating
+# `c(1, 2)` as a success indicator would be a guess about which value is the
+# success.
+is_binary <- function(y) {
+  if (is.logical(y)) {
+    return(TRUE)
+  }
+
+  if (is.factor(y) || is.character(y)) {
+    return(length(unique(y[!is.na(y)])) == 2L)
+  }
+
+  # Exactly two values, not "at most two": a constant response is degenerate
+  # whatever the family, and reading `rep(1, n)` as an all-successes binomial
+  # would replace a clear complaint about no variation with a silent fit.
+  if (is.numeric(y) && !is.matrix(y)) {
+    values <- unique(y[!is.na(y)])
+    return(length(values) == 2L && all(values %in% c(0, 1)))
+  }
+
+  FALSE
+}
+
+# A two-column matrix of times and event indicators, which is the form the
+# survival families accept alongside a Surv object.
+is_survival_matrix <- function(y) {
+  if (!is.matrix(y) || ncol(y) != 2L || !is.numeric(y)) {
+    return(FALSE)
+  }
+
+  events <- y[, 2L]
+  events <- events[!is.na(events)]
+
+  # Non-negative times and a 0/1 second column. A two-column binomial response
+  # is counts of successes and failures, so it fails the second test unless
+  # every count is zero or one -- and then it is ambiguous, and survival is the
+  # reading a two-column *numeric* matrix more often has.
+  all(y[, 1L] >= 0, na.rm = TRUE) &&
+    !is_null(events) > 0L &&
+    all(events %in% c(0, 1))
+}
+
+as_bartisan_family <- function(family) {
+  if (is.character(family)) {
+    arg::arg_string(family)
+    arg::arg_element(family, bartisan_family_names)
+
+    # "Gamma" is the one name whose function is not the exported family: see
+    # gamma_string_family().
+    family <- {
+      if (identical(family, "Gamma")) gamma_string_family
+      else get(family, mode = "function", envir = asNamespace("bartisan"))
+    }
+  }
+
+  if (is.function(family)) {
+    family <- family()
+  }
+
+  if (!inherits(family, "family")) {
+    arg::err("{.arg family} must be a family name, a family function, or a
+              family object, such as {.code binomial(\"logit\")}")
+  }
+
+  name <- family[["family"]]
+  link <- family[["link"]]
+
+  # `bartisan_family_names` rather than `names(valid_links)`, which is what this
+  # used to report. Those are the engine's own family strings, and several of
+  # them are not names a caller can write: `"zip"` and `"zinb"` are reached
+  # through `zi_poisson()` and `zi_negbin()`, `"beta"` through `Beta()`, `"mnp"`
+  # through `multinomial("probit")`, `"aft"` through the three `*_aft()`
+  # functions, and `"custom"` through `custom_family()`. Reporting them sent a
+  # caller looking for functions that do not exist, and it disagreed with the
+  # error the string branch above gives for the same mistake.
+  if (!name %in% names(valid_links)) {
+    arg::err(c("{.val {name}} is not a supported {.arg family} in {.fn bartisan}.",
+               i = "Supported families are {.val {bartisan_family_names}}, each
+                    the name of a function to call.",
+               i = "For a likelihood that is not among them, {.fn custom_family}
+                    takes the log density itself. A {.cls family} object carries
+                    a link and a variance function rather than a density, so one
+                    cannot be built from it automatically."))
+  }
+
+  # The gamma family is the one place a supplied link is overruled rather than
+  # honored. The inverse link -- base R's default, because it is the canonical
+  # link for the gamma -- needs a positive mean, and this sampler's additive
+  # predictor is unconstrained: a draw that wanders non-positive has no gamma
+  # density, so it is rejected, and any prediction there is NaN. Measured over
+  # eight replicates on heavy-tailed data, five of them had such draws. The log
+  # link is defined on the whole line, was faster and more accurate in every
+  # setting measured, and is what a gamma regression almost always means in
+  # practice. So it is used regardless, and the caller is told once.
+  if (identical(name, "Gamma") && !identical(link, "log")) {
+    arg::msg(c(i = "The {.val {link}} link is ignored: {.fn Gamma} is fitted on
+                    the log link here.",
+               i = "The additive predictor is unconstrained, and only the log
+                    link's inverse keeps the mean positive over the whole line;
+                    the others give rejected draws and {.val NaN} predictions.",
+               i = "Write {.code Gamma(\"log\")} to silence this."))
+    link <- "log"
+  }
+
+  allowed <- valid_links[[name]]
+  custom_link <- NULL
+
+  if (!link %in% allowed) {
+    if (!name %in% names(native_links)) {
+      arg::err("the {.val {link}} link is not supported for the {.val {name}}
+                family. Supported links are {.val {allowed}}")
+    }
+
+    # A link the engine does not carry is honored by composing it onto the
+    # scale the engine's family works on. That needs the inverse link, which a
+    # stats::family object carries; a bare name is resolved through make.link().
+    custom_link <- link_functions(family, link)
+  }
+
+  # A bartisan family carries its own options -- a fixed dispersion, a reference
+  # category, a supplied log density -- which have to survive; a stats::family
+  # object carries link machinery that has already been read off above.
+  #
+  # An ordinary `family` object naming one of ours carries no settings at all,
+  # and for most families that is the same as taking the defaults, since their
+  # default is to draw everything. `tweedie()` is the exception: its power is
+  # fixed unless asked for, and an empty option list reads as "not supplied" and
+  # so as "draw it". Without the fill-in below, `family = "tweedie"` and
+  # `family = glmmTMB::tweedie()` would name the same distribution and fit
+  # different models.
+  extra <- {
+    if (inherits(family, "bartisan_family")) {
+      family[!names(family) %in% c("family", "link")]
+    }
+    else {
+      family_defaults(name)
+    }
+  }
+
+  family <- do.call(new_bartisan_family,
+                    c(list(family = name, link = link), extra))
+
+  if (!is_null(custom_link)) {
+    family[["custom_link"]] <- custom_link
+    family[["native_link"]] <- native_links[[name]]
+    warn_restricted_link(custom_link, native_links[[name]], link)
+  }
+
+  family
+}
+
+# A composed link is only as good as its range. The engine's predictor is
+# unconstrained, so if the caller's inverse link maps some of the line outside
+# the domain the engine's own link needs -- a negative mean for `log`, something
+# outside the unit interval for `logit` -- those predictors give a non-finite
+# density. The sampler rejects them, which is correct but is wasted work, and it
+# is almost never what the caller intended: `stats::Gamma()`'s default inverse
+# link is the case that turns up in practice, and it cost 1.9 times the time of
+# the log link and fitted slightly worse on 600 observations. So say so once,
+# rather than leaving it to be discovered.
+warn_restricted_link <- function(custom_link, native, link) {
+  if (identical(native, "identity")) {
+    return(invisible())
+  }
+
+  # A grid wide enough to cover any predictor the leaf prior would produce.
+  mu <- suppressWarnings(custom_link[["linkinv"]](seq(-6, 6, length.out = 121L)))
+
+  inside <- {
+    if (identical(native, "log")) isTRUE(all(is.finite(mu) & mu > 0))
+    else isTRUE(all(is.finite(mu) & mu > 0 & mu < 1))
+  }
+
+  if (!inside) {
+    arg::msg(c(i = "The {.val {link}} link's inverse does not cover the whole
+                  additive predictor, so some proposals will have a non-finite
+                  density and be rejected.",
+               i = "The fit is valid but slower and less accurate; a link whose
+                  inverse is defined on the whole line, such as
+                  {.val {native}}, avoids it."))
+  }
+
+  invisible()
+}
+
+# The inverse link and its derivative, taken from the family object when it has
+# them -- which is the case for anything stats::binomial() and friends return,
+# including a link built by the caller and passed as a "link-glm" object -- and
+# resolved from the name otherwise.
+link_functions <- function(family, link) {
+  out <- family[c("linkfun", "linkinv", "mu.eta")]
+
+  if (!is.function(out[["linkinv"]]) || !is.function(out[["linkfun"]])) {
+    resolved <- try(stats::make.link(link), silent = TRUE)
+
+    if (inherits(resolved, "try-error")) {
+      arg::err("the {.val {link}} link is not one {.fn stats::make.link} knows.
+                Supply it as a link object, as in
+                {.code binomial(link = my_link)}, so that the inverse link
+                comes with it")
+    }
+
+    out <- resolved[c("linkfun", "linkinv", "mu.eta")]
+  }
+
+  if (!is.function(out[["mu.eta"]])) {
+    out[["mu.eta"]] <- NULL
+  }
+
+  # These are the caller's functions, and the sampler calls them one predictor
+  # value at a time, where a function that returns a single number whatever it
+  # is given looks right. Such a function ran a whole fit and then failed in
+  # `colMeans()` on the fitted values, so what they return is checked here,
+  # where the mistake can be named.
+  probe <- seq(-6, 6, length.out = 121L)
+
+  for (nm in intersect(c("linkinv", "mu.eta"), names(out))) {
+    value <- suppressWarnings(out[[nm]](probe))
+
+    if (!is.numeric(value) || length(value) != length(probe)) {
+      arg::err(c("The {.code {nm}} function of the {.val {link}} link must return
+                  a number for each value of the additive predictor it is given.",
+                 i = "Given {length(probe)} values, it returned {length(value)}
+                      of type {.cls {typeof(value)}}."))
+    }
+  }
+
+  out
+}
+
+# Build the map from the caller's additive predictor to the scale the engine's
+# family works on, together with its derivative when the link brought one.
+compose_link <- function(custom_link, native) {
+  linkinv <- custom_link[["linkinv"]]
+  mu_eta <- custom_link[["mu.eta"]]
+
+  # The warnings are suppressed rather than avoided, and the values are left
+  # exactly as they were. A link the caller supplied maps an unconstrained
+  # predictor to a mean that the engine's own scale constrains -- the inverse
+  # link of `Gamma()` is the standard case, where a negative predictor gives a
+  # negative mean and `log()` of it is NaN -- and the sampler already treats a
+  # NaN density as an impossible proposal and rejects it. So the proposal is
+  # handled correctly and the only thing the warning does is emit one line per
+  # rejected proposal, which on a default `Gamma()` fit is dozens of them.
+  theta <- switch(native,
+                  identity = linkinv,
+                  log = function(eta) suppressWarnings(log(linkinv(eta))),
+                  logit = function(eta) suppressWarnings(stats::qlogis(linkinv(eta))))
+
+  dtheta <- if (!is_null(mu_eta)) {
+    switch(native,
+           identity = mu_eta,
+           log = function(eta) mu_eta(eta) / linkinv(eta),
+           logit = function(eta) {
+             mu <- linkinv(eta)
+             mu_eta(eta) / (mu * (1 - mu))
+           })
+  }
+
+  list(link_theta = theta, link_dtheta = dtheta)
+}

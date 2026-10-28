@@ -1,0 +1,371 @@
+test_that("stats family objects, functions and names all resolve", {
+  expect_identical(as_bartisan_family(gaussian())[["family"]], "gaussian")
+  expect_identical(as_bartisan_family(binomial)[["family"]], "binomial")
+  expect_identical(as_bartisan_family("poisson")[["family"]], "poisson")
+
+  expect_identical(as_bartisan_family(binomial("probit"))[["link"]], "probit")
+  expect_identical(as_bartisan_family(stats::Gamma("log"))[["family"]], "Gamma")
+})
+
+test_that("bartisan-specific families carry their own names and links", {
+  expect_identical(as_bartisan_family(negbin())[["family"]], "negbin")
+  expect_identical(as_bartisan_family(ordinal("probit"))[["link"]], "probit")
+  expect_identical(as_bartisan_family(multinomial())[["family"]], "multinomial")
+  expect_identical(as_bartisan_family(weibull_aft())[["link"]], "weibull")
+  expect_identical(as_bartisan_family(lognormal_aft())[["family"]], "aft")
+  expect_identical(as_bartisan_family(gaussian_ls())[["family"]],
+                   "gaussian_ls")
+})
+
+test_that("unsupported families and links are rejected with a clear message", {
+  # A link the engine does not compile is composed onto the family's native
+  # scale instead of being rejected, but only for the families where that
+  # composition is defined.
+  # The family constructors police their own links, so reaching the check in
+  # as_bartisan_family() means handing it a family object built elsewhere.
+  bad <- structure(list(family = "ordinal", link = "cauchit"), class = "family")
+  expect_error(as_bartisan_family(bad), "link is not supported")
+  expect_error(as_bartisan_family(ordinal("cauchit")), "should be one of")
+  expect_error(as_bartisan_family(stats::inverse.gaussian()),
+               "is not a supported")
+  expect_error(as_bartisan_family(1), "must be a family name")
+})
+
+test_that("a link the engine does not compile is carried as a composition", {
+  f <- as_bartisan_family(binomial("cauchit"))
+  expect_identical(f[["link"]], "cauchit")
+  expect_identical(f[["native_link"]], "logit")
+  expect_true(is.function(f[["custom_link"]][["linkinv"]]))
+
+  # The composed map takes the caller's predictor to the log odds, and its
+  # derivative is the chain rule applied to the caller's mu.eta.
+  parts <- compose_link(f[["custom_link"]], "logit")
+  eta <- c(-2, -0.5, 0, 1.5)
+  expect_equal(parts[["link_theta"]](eta),
+               stats::qlogis(stats::pcauchy(eta)))
+  expect_equal(parts[["link_dtheta"]](eta),
+               stats::dcauchy(eta) /
+                 (stats::pcauchy(eta) * (1 - stats::pcauchy(eta))))
+
+  # The native links stay native, so nothing is composed for them.
+  expect_null(as_bartisan_family(binomial("probit"))[["custom_link"]])
+  expect_null(as_bartisan_family(poisson())[["custom_link"]])
+})
+
+test_that("a family-specific option survives resolution", {
+  expect_identical(as_bartisan_family(negbin(theta = 3))[["theta"]], 3)
+  expect_identical(as_bartisan_family(multinomial(reference = "b"))[["reference"]],
+                   "b")
+  expect_null(as_bartisan_family(multinomial())[["reference"]])
+})
+
+test_that("a two-level factor response works for binomial, more does not", {
+  prepared <- prepare_binomial(factor(c("no", "yes", "no")), rep(1, 3), 3)
+  expect_identical(prepared[["y"]], c(0, 1, 0))
+  expect_identical(prepared[["levels"]], c("no", "yes"))
+
+  expect_error(prepare_binomial(factor(c("a", "b", "c")), rep(1, 3), 3),
+               "exactly two levels")
+})
+
+test_that("binomial counts become proportions with trials as weights", {
+  y <- cbind(c(2, 5), c(8, 5))
+  prepared <- prepare_binomial(y, c(1, 1), 2)
+
+  expect_identical(prepared[["y"]], c(0.2, 0.5))
+  expect_identical(prepared[["weights"]], c(10, 10))
+})
+
+test_that("an unordered factor for the ordinal family warns but proceeds", {
+  expect_warning(out <- prepare_ordered(factor(c("a", "b", "c")), "ordinal"),
+                 "unordered factor")
+  expect_identical(out[["num_cat"]], 3L)
+})
+
+test_that("survival responses are validated", {
+  ok <- cbind(c(1, 2, 3), c(1, 0, 1))
+  expect_identical(prepare_surv(ok, 3)[["event"]], c(1, 0, 1))
+
+  expect_error(prepare_surv(cbind(c(0, 1), c(1, 1)), 2), "strictly positive")
+  expect_error(prepare_surv(cbind(c(1, 2), c(0, 0)), 2), "very observation is censored")
+  expect_error(prepare_surv(cbind(c(1, 2), c(1, 3)), 2), "event indicator")
+  expect_error(prepare_surv(c(1, 2, 3), 3), "two-column response")
+})
+
+test_that("a multi-column response is refused by the single-column families", {
+  surv <- structure(cbind(time = c(1, 2, 3), status = c(1, 0, 1)),
+                    class = "Surv", type = "right")
+
+  # A `Surv` object is a numeric matrix, so without this check `as.numeric()`
+  # flattens it and each family fails differently and misleadingly further on.
+  # A custom family is not among them: its density takes the response as given.
+  for (name in c("gaussian", "Gamma", "beta", "tweedie")) {
+    expect_error(check_numeric_response(surv, name), "one response value per")
+    expect_error(check_numeric_response(surv, name), "survival family")
+  }
+
+  expect_error(check_numeric_response(cbind(c(2, 5), c(8, 5)), "gaussian"),
+               "successes and failures")
+
+  # One column is a vector that happens to be stored as a matrix, and stays one.
+  expect_identical(check_numeric_response(cbind(c(1, 2, 3)), "gaussian"),
+                   c(1, 2, 3))
+})
+
+test_that("unused response levels are dropped for multinomial", {
+  y <- factor(c("a", "b", "a"), levels = c("a", "b", "c"))
+  expect_warning(out <- prepare_unordered(y, "multinomial"), "unused")
+  expect_identical(out[["num_cat"]], 2L)
+  expect_identical(out[["levels"]], c("a", "b"))
+})
+
+test_that("`Beta()` is the interior of `ordbeta()` and says so about boundaries", {
+  d <- sim_x(n = 200, seed = 72)
+  set.seed(172)
+  mu <- stats::plogis(0.5 * d$x1)
+  d$y <- stats::rbeta(nrow(d), mu * 10, 10 - mu * 10)
+
+  expect_identical(as_bartisan_family(Beta())[["family"]], "beta")
+  expect_identical(as_bartisan_family(Beta())[["link"]], "logit")
+  expect_identical(as_bartisan_family("Beta")[["link"]], "logit")
+
+  # Only the logit link is compiled. The other two are reached by composition,
+  # and this checks that they actually are: listing them as native links made
+  # them silently fit the logit model and then back-transform as though they had
+  # not, so the fitted means were wrong.
+  expect_null(as_bartisan_family(Beta("logit"))[["custom_link"]])
+
+  for (link in c("probit", "cloglog")) {
+    family <- as_bartisan_family(Beta(link))
+    expect_identical(family[["link"]], link, label = link)
+    expect_false(is_null(family[["custom_link"]]), label = link)
+    expect_identical(family[["native_link"]], "logit", label = link)
+  }
+
+  fit_link <- function(link) {
+    set.seed(9)
+    bartisan(y ~ ., d, family = Beta(link),
+             control = quick_control(num_trees = 5L, num_burn = 10L,
+                                     num_draws = 10L))
+  }
+  expect_false(identical(fit_link("logit")[["eta"]],
+                         fit_link("probit")[["eta"]]))
+  expect_false(identical(fit_link("logit")[["eta"]],
+                         fit_link("cloglog")[["eta"]]))
+
+  # That the predictors differ is not enough: the predictor's starting offset
+  # is the named link of the mean, so two fits of the logit model differ a
+  # little when one of them was asked for probit. The link reached the sampler
+  # only if the recorded log likelihood is the beta density at the named
+  # link's inverse of the recorded predictor, draw by draw. The factory once
+  # dropped the composition for this family alone, and this passed above.
+  inverse <- list(probit = stats::pnorm,
+                  cloglog = function(eta) 1 - exp(-exp(eta)))
+
+  for (link in names(inverse)) {
+    fit <- fit_link(link)
+    eta <- fit[["eta"]][[1L]]
+    phi <- fit[["aux"]][, "phi"]
+
+    by_draw <- vapply(seq_len(nrow(eta)), function(s) {
+      mu <- inverse[[link]](eta[s, ])
+      sum(stats::dbeta(d$y, mu * phi[s], (1 - mu) * phi[s], log = TRUE))
+    }, numeric(1L))
+
+    expect_equal(by_draw, fit[["loglik"]], tolerance = 1e-8, label = link)
+  }
+
+  # A response at either endpoint has no beta density, so it is an error rather
+  # than something to nudge inward, and the message names the family that does
+  # model the endpoints.
+  for (bad in c(0, 1)) {
+    dd <- d
+    dd$y[1L] <- bad
+    expect_error(bartisan(y ~ ., dd, family = Beta(),
+                         control = quick_control()),
+                 "strictly between 0 and 1")
+  }
+
+  # A fixed precision is respected exactly and reported as a constant.
+  fit <- bartisan(y ~ ., d, family = Beta(phi = 7),
+                  control = quick_control(num_trees = 5L, num_burn = 10L,
+                                          num_draws = 10L))
+  expect_true(all(fit[["aux"]][, "phi"] == 7))
+
+  expect_error(Beta(phi = -1))
+
+  # Any other link is composed, as it is for `binomial()`, so `cauchit` is
+  # accepted rather than refused; a name that is not a link at all is not.
+  expect_false(is_null(as_bartisan_family(Beta("cauchit"))[["custom_link"]]))
+  expect_error(as_bartisan_family(Beta("not-a-link")))
+})
+
+test_that("the gamma family overrules any link but the log one", {
+  # The inverse link -- base R's default, because it is the canonical link for
+  # the gamma -- needs a positive mean, and this sampler's additive predictor is
+  # unconstrained, so a draw that wanders non-positive has no gamma density at
+  # all. Rather than accept that and warn, the link is replaced. `stats::Gamma()`
+  # itself is left exactly as base R defines it, so that attaching this package
+  # cannot change what `glm()` does.
+  expect_false("Gamma" %in% getNamespaceExports("bartisan"))
+  expect_identical(stats::Gamma()[["link"]], "inverse")
+
+  for (link in c("inverse", "identity", "sqrt")) {
+    expect_message(family <- as_bartisan_family(stats::Gamma(link)),
+                   "is ignored")
+    expect_identical(family[["link"]], "log")
+
+    # And nothing composed survives, since the caller's link is not honored.
+    expect_null(family[["custom_link"]])
+  }
+
+  # Naming the log link, or naming the family as this package's own string, is
+  # silent: there is nothing to report.
+  expect_no_message(family <- as_bartisan_family(stats::Gamma("log")))
+  expect_identical(family[["link"]], "log")
+
+  expect_no_message(family <- as_bartisan_family("Gamma"))
+  expect_identical(family[["link"]], "log")
+
+  # And the fixed-shape family is gone, so nothing offers it.
+  expect_false(exists("Gamma_shape", where = asNamespace("bartisan"),
+                      inherits = FALSE))
+})
+
+test_that("a composed link whose inverse has a restricted range is reported", {
+  d <- sim_x(n = 120, seed = 71)
+  d$y <- stats::rgamma(nrow(d), 4, 4 / exp(1 + d$x1))
+  ctrl <- quick_control(num_trees = 5L, num_burn = 20L, num_draws = 20L)
+
+  # The gamma is no longer an example of this, because its link is replaced
+  # rather than composed; the Poisson identity link is the remaining case.
+  d$count <- stats::rpois(nrow(d), 3)
+  expect_message(bartisan(count ~ x1 + x2 + x3, d, family = poisson("identity"),
+                         control = ctrl),
+                 "does not cover the whole additive predictor")
+
+  # A compiled link has nothing composed, and a composed link whose inverse does
+  # cover the line is fine, so neither says anything.
+  expect_no_message(bartisan(y ~ ., d, family = stats::Gamma("log"),
+                            control = ctrl))
+
+  d$bin <- stats::rbinom(nrow(d), 1, 0.4)
+  expect_no_message(bartisan(bin ~ x1 + x2 + x3, d, family = binomial("cauchit"),
+                            control = ctrl))
+})
+
+# ---------------------------------------------------------------------------
+# Gamma location-scale. The mean is `Gamma("log")`'s, and the second forest
+# carries the log dispersion, so the coefficient of variation is free to move
+# with the predictors instead of being one drawn shape for the sample.
+# ---------------------------------------------------------------------------
+
+test_that("Gamma_ls() names its forests and refuses a non-positive response", {
+  expect_identical(as_bartisan_family(Gamma_ls())[["family"]], "Gamma_ls")
+  expect_identical(as_bartisan_family(Gamma_ls())[["link"]], "log")
+  expect_error(Gamma_ls("identity"))
+
+  d <- sim_x(n = 60, seed = 4)
+  d$y <- c(0, stats::rgamma(59, shape = 2, rate = 1))
+
+  expect_error(bartisan(y ~ ., data = d, family = Gamma_ls(),
+                        control = quick_control()),
+               "strictly positive")
+})
+
+test_that("Gamma_ls()'s log density is the gamma density it claims to be", {
+  # The parameterization is the whole contract: the first predictor is the log
+  # mean and the second the log dispersion, so the shape is exp(-eta2). Checked
+  # against dgamma() rather than against another part of this package.
+  set.seed(9)
+  eta1 <- matrix(seq(-1, 2, length.out = 25L), nrow = 1L)
+  eta2 <- matrix(stats::rnorm(25L) * 0.5, nrow = 1L)
+  y <- stats::rgamma(25L, shape = 2, rate = 1)
+
+  shape <- exp(-as.vector(eta2))
+  reference <- stats::dgamma(y, shape = shape,
+                             rate = shape / exp(as.vector(eta1)), log = TRUE)
+
+  got <- .bartisan_logdens(y, rep(1, 25L), list(eta1, eta2), "Gamma_ls", "log",
+                           list(), matrix(0, 1L, 0L))
+
+  expect_equal(as.vector(got), reference, tolerance = 1e-10)
+})
+
+test_that("Gamma_ls() with an intercept-only scale holds the dispersion constant", {
+  d <- sim_x(n = 100, p = 2, seed = 21)
+  d$y <- stats::rgamma(nrow(d), shape = 4, rate = 4 / exp(0.5 + d$x1))
+
+  fit <- bartisan(list(y ~ x1 + x2, ~ 1), data = d, family = Gamma_ls(),
+                  control = quick_control(gate = "hard"))
+
+  # The scale forest never splits, so its predictor is one number.
+  expect_equal(sum(fit[["counts"]][["log_dispersion"]]), 0)
+  expect_equal(stats::sd(colMeans(fit[["eta"]][[2L]])), 0)
+})
+
+test_that("Gamma_ls() with an intercept-only scale matches Gamma()", {
+  skip_on_cran()
+
+  # A forest whose formula names no predictor is a sum of stumps, so the
+  # dispersion is one drawn scalar and the model is `Gamma("log")` written
+  # another way. The two priors on that scalar differ, so this is an agreement
+  # check rather than an identity.
+  set.seed(20)
+  n <- 600
+  d <- data.frame(x1 = stats::runif(n), x2 = stats::runif(n))
+  mu <- exp(0.5 + 1.2 * sin(pi * d$x1) + 0.8 * d$x2)
+  d$y <- stats::rgamma(n, shape = 4, rate = 4 / mu)
+
+  ctrl <- bartisan_control(num_trees = 50L, num_burn = 300L, num_draws = 300L,
+                           gate = "hard")
+
+  set.seed(1)
+  plain <- bartisan(y ~ x1 + x2, data = d, family = Gamma("log"),
+                    control = ctrl)
+  set.seed(1)
+  ls_fit <- bartisan(list(y ~ x1 + x2, ~ 1), data = d, family = Gamma_ls(),
+                     control = ctrl)
+
+  # The implied shape agrees with the drawn one, and both with the truth.
+  shape_plain <- mean(plain[["aux"]][, "shape"])
+  shape_ls <- mean(exp(-ls_fit[["eta"]][[2L]]))
+
+  expect_equal(shape_ls, shape_plain, tolerance = 0.1)
+  expect_equal(shape_ls, 4, tolerance = 0.2)
+
+  # And the mean surfaces agree.
+  expect_gt(stats::cor(predict(plain, type = "response"),
+                       predict(ls_fit, type = "response")), 0.98)
+})
+
+test_that("Gamma_ls() recovers a dispersion that varies with the predictors", {
+  skip_on_cran()
+
+  set.seed(7)
+  n <- 800
+  d <- data.frame(x1 = stats::runif(n), x2 = stats::runif(n))
+  mu <- exp(1 + 0.8 * d$x1)
+  disp <- exp(-1.5 + 1.8 * d$x2)
+  d$y <- stats::rgamma(n, shape = 1 / disp, rate = (1 / disp) / mu)
+
+  set.seed(3)
+  fit <- bartisan(y ~ x1 + x2, data = d, family = Gamma_ls(),
+                  control = bartisan_control(num_trees = c(50L, 20L),
+                                             num_burn = 300L, num_draws = 300L,
+                                             gate = "hard"))
+
+  expect_gt(stats::cor(colMeans(exp(fit[["eta"]][[2L]])), disp), 0.9)
+
+  # Modeling the dispersion is worth a large number of log points here, which is
+  # what the family exists for.
+  set.seed(3)
+  plain <- bartisan(y ~ x1 + x2, data = d, family = Gamma("log"),
+                    control = bartisan_control(num_trees = 50L,
+                                               num_burn = 300L,
+                                               num_draws = 300L,
+                                               gate = "hard"))
+
+  expect_gt(sum(predict(fit, type = "density", log = TRUE)),
+            sum(predict(plain, type = "density", log = TRUE)))
+})

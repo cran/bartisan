@@ -1,0 +1,419 @@
+# The Dirichlet process mixture for the error distribution. What it adds over
+# gaussian() is a *shape* for the errors, so the tests are about the mixture
+# being a real posterior over shapes -- and about the reporting chart, which puts
+# the mixture at mean zero so that the predictor is the conditional mean.
+
+test_that("the mixture is stored, weighted and shaped as a mixture", {
+  d <- sim_x(n = 400, seed = 301)
+  set.seed(1301)
+  d$y <- 3 * sin(pi * d$x1) + 2 * stats::rt(nrow(d), 3)
+
+  fit <- bartisan(y ~ ., d, family = dpm(),
+                  control = quick_control(num_trees = 20L, num_burn = 200L,
+                                          num_draws = 200L))
+
+  expect_identical(colnames(fit[["aux"]]),
+                   c("alpha", "clusters", "center", "error_sd"))
+  expect_true(all(fit[["aux"]][, "alpha"] > 0))
+  expect_true(all(fit[["aux"]][, "error_sd"] > 0))
+
+  # More than one component, and never more than one per observation.
+  clusters <- fit[["aux"]][, "clusters"]
+  expect_true(all(clusters >= 1 & clusters <= nrow(d)))
+  expect_gt(max(clusters), 1)
+
+  # The components are stored flat with one offset per draw, because the count
+  # changes from draw to draw. Their weights are a probability distribution and
+  # their number matches what `aux` reports.
+  starts <- fit[["mixture_start"]]
+  expect_length(starts, nrow(fit[["aux"]]) + 1L)
+  expect_identical(diff(starts) / 3, clusters)
+
+  for (s in c(1L, 100L, 200L)) {
+    components <- mixture_at(fit, s)
+    expect_identical(nrow(components), as.integer(clusters[s]))
+    expect_equal(sum(components[, "weight"]), 1)
+    expect_true(all(components[, "sd"] > 0))
+  }
+})
+
+test_that("the reporting chart puts the mixture at zero and the mean on the predictor", {
+  skip_on_cran()
+
+  set.seed(1303)
+  d <- data.frame(x = stats::runif(500, -1, 1))
+  truth <- 10 * d$x^3
+
+  # A skewed error, so that the raw mixture is a long way off centre and the
+  # shift being taken out is a real one rather than rounding.
+  d$y <- truth + 3 * (stats::rgamma(nrow(d), 1.5, 1.5) - 1)
+
+  fit <- bartisan(y ~ x, d, family = dpm(),
+                  control = quick_control(num_trees = 50L, num_burn = 400L,
+                                          num_draws = 400L))
+
+  on_link <- stats::predict(fit, type = "link")
+
+  # The level of the predictor no longer trades off against anything, which is
+  # the point: before centring its standard deviation across draws was the size
+  # of the drift rather than of the posterior.
+  level <- rowMeans(stats::predict(fit, type = "link", draws = TRUE))
+  expect_lt(stats::sd(level), 0.5)
+  expect_lt(abs(mean(on_link - truth)), 0.5)
+  expect_lt(sqrt(mean((on_link - truth)^2)), 1.5)
+})
+
+test_that("a mixture's response scale is its predictor", {
+  set.seed(1304)
+  d <- data.frame(x = stats::runif(120, -1, 1))
+  d$y <- 10 * d$x^3 + 3 * (stats::rgamma(nrow(d), 1.5, 1.5) - 1)
+
+  fit <- bartisan(y ~ x, d, family = dpm(), control = quick_control())
+
+  # The sampler works in a chart where nothing forces the mixture to be centred;
+  # reporting is done in the one where it is, so the error mean is zero exactly
+  # and the whole conditional mean sits on the predictor.
+  on_link <- stats::predict(fit, type = "link")
+  on_response <- stats::predict(fit, type = "response")
+  expect_identical(on_response, on_link)
+
+  # `center` is the shift that was taken out, so it is not zero when the error is
+  # skewed -- that is the quantity, not an estimate of an error mean.
+  expect_gt(stats::sd(fit[["aux"]][, "center"]), 0)
+})
+
+test_that("`error_density()` reports a centred density", {
+  skip_on_cran()
+
+  d <- sim_x(n = 400, seed = 307)
+  set.seed(1307)
+  d$y <- 2 * d$x1 + 2 * (stats::rgamma(nrow(d), 1.5, 1.5) - 1)
+
+  fit <- bartisan(y ~ ., d, family = dpm(),
+                  control = quick_control(num_trees = 20L, num_burn = 300L,
+                                          num_draws = 300L))
+
+  grid <- seq(-12, 12, length.out = 1201L)
+  density <- error_density(fit, at = grid)[, "mean"]
+  step <- diff(grid)[1L]
+
+  expect_equal(sum(density) * step, 1, tolerance = 1e-3)
+  expect_equal(sum(grid * density) * step, 0, tolerance = 0.05)
+  # The shape is what the family is for, so the skewness should survive.
+  expect_gt(sum(grid^3 * density) * step, 0.5)
+})
+
+test_that("the reported likelihood is the mixture's own predictive", {
+  d <- sim_x(n = 250, seed = 305)
+  set.seed(1305)
+  d$y <- 2 * d$x1 + stats::rnorm(nrow(d))
+
+  fit <- bartisan(y ~ ., d, family = dpm(),
+                  control = quick_control(num_trees = 20L, num_burn = 200L,
+                                          num_draws = 200L))
+
+  # The C++ sums the same expression `predict(type = "density")` builds in R from
+  # the stored components, so the two have to agree exactly rather than closely.
+  # An error in either would show up here.
+  density <- stats::predict(fit, type = "density", draws = TRUE, log = TRUE)
+  expect_equal(rowSums(density), fit[["loglik"]], tolerance = 1e-8)
+
+  # And it works on new data, which needs the outcome.
+  held <- d[1:25, ]
+  expect_length(stats::predict(fit, newdata = held, type = "density"), 25L)
+  expect_error(stats::predict(fit, newdata = held[, c("x1", "x2", "x3")],
+                              type = "density"),
+               "must contain the outcome")
+})
+
+test_that("error_density integrates to one and finds the shape of the errors", {
+  skip_on_cran()
+
+  set.seed(1307)
+  d <- data.frame(x = stats::runif(600, -1, 1))
+
+  # Two well-separated normals, which no single normal can look like.
+  side <- stats::rbinom(nrow(d), 1L, 0.5)
+  d$y <- 5 * d$x + ifelse(side == 1L, stats::rnorm(nrow(d), 3, 0.5),
+                          stats::rnorm(nrow(d), -3, 0.5))
+
+  fit <- bartisan(y ~ x, d, family = dpm(),
+                  control = quick_control(num_trees = 50L, num_burn = 500L,
+                                          num_draws = 500L))
+
+  estimated <- error_density(fit, at = seq(-8, 8, length.out = 401L))
+  step <- diff(estimated$at)[1L]
+  expect_equal(sum(estimated$mean) * step, 1, tolerance = 0.05)
+
+  # Bimodal: the density at the centre has to be well below the density at the
+  # two modes, which is exactly what a single normal could not produce.
+  centre <- estimated$mean[which.min(abs(estimated$at))]
+  peaks <- max(estimated$mean)
+  expect_lt(centre, 0.5 * peaks)
+})
+
+test_that("error_density brackets its mean and refuses a fit without a mixture", {
+  set.seed(1308)
+  d <- data.frame(x = stats::runif(100, -1, 1))
+  d$y <- 5 * d$x + stats::rnorm(nrow(d))
+
+  fit <- bartisan(y ~ x, d, family = dpm(), control = quick_control())
+
+  estimated <- error_density(fit, at = seq(-8, 8, length.out = 401L))
+  expect_identical(nrow(estimated), 401L)
+  expect_named(estimated, c("at", "mean", "lower", "upper"))
+  expect_true(all(estimated$mean >= 0))
+  expect_true(all(estimated$lower <= estimated$mean))
+  expect_true(all(estimated$upper >= estimated$mean))
+
+  # Refused where there is no error distribution to estimate.
+  plain <- bartisan(y ~ x, d, family = stats::gaussian(),
+                    control = quick_control())
+  expect_error(error_density(plain), "estimated error distribution")
+})
+
+test_that("the mixture adapts to heavy tails and stays put when the errors are normal", {
+  skip_on_cran()
+
+  set.seed(1309)
+  d <- data.frame(x = stats::runif(800, -1, 1))
+  truth <- 10 * d$x^3
+  chain <- quick_control(num_trees = 50L, num_burn = 500L, num_draws = 500L)
+
+  # Normal errors: the mixture should not need many components, and should agree
+  # with the Gaussian family on the scale it reports. Each fit is seeded rather
+  # than started from wherever the one before it left the stream.
+  d$y <- truth + stats::rnorm(nrow(d), 0, 2)
+
+  set.seed(1319)
+  normal_fit <- bartisan(y ~ x, d, family = dpm(), control = chain)
+
+  set.seed(1319)
+  plain <- bartisan(y ~ x, d, family = stats::gaussian(), control = chain)
+
+  expect_equal(stats::sigma(normal_fit), stats::sigma(plain), tolerance = 0.15)
+  expect_lt(sqrt(mean((stats::predict(normal_fit, type = "response") -
+                         truth)^2)),
+            2 * sqrt(mean((stats::predict(plain, type = "response") -
+                             truth)^2)))
+
+  # Heavy tails: the estimated density has to be *peaked* relative to the normal
+  # with the same standard deviation, which is what a heavy tail looks like from
+  # the middle and is the thing the Gaussian family cannot represent.
+  set.seed(1310)
+  d$y <- truth + 2 * stats::rt(nrow(d), 3)
+  heavy <- bartisan(y ~ x, d, family = dpm(), control = chain)
+
+  spread <- stats::sigma(heavy)
+  estimated <- error_density(heavy, at = c(0))
+  expect_gt(estimated$mean, 1.3 * stats::dnorm(0, 0, spread))
+})
+
+test_that("dpm refuses prior weights, and says why", {
+  d <- sim_x(n = 150, seed = 311)
+  set.seed(1311)
+  d$y <- stats::rnorm(nrow(d))
+  d$w <- stats::runif(nrow(d), 0.5, 1.5)
+
+  expect_error(bartisan(y ~ x1 + x2, d, family = dpm(), weights = w,
+                       control = quick_control()),
+               "does not take prior weights")
+
+  # Unit weights are fine, since they are what no weights means.
+  d$w <- 1
+  expect_no_error(bartisan(y ~ x1 + x2, d, family = dpm(), weights = w,
+                          control = quick_control()))
+})
+
+test_that("a fixed concentration is honored and the drawn one moves", {
+  d <- sim_x(n = 100, seed = 314)
+  set.seed(1314)
+  d$y <- 2 * d$x1 + 2 * stats::rt(nrow(d), 3)
+
+  fixed <- bartisan(y ~ ., d, family = dpm(alpha = 2),
+                    control = quick_control())
+  expect_true(all(fixed[["aux"]][, "alpha"] == 2))
+
+  drawn <- bartisan(y ~ ., d, family = dpm(), control = quick_control())
+  expect_gt(length(unique(drawn[["aux"]][, "alpha"])), 1L)
+})
+
+test_that("a larger concentration means more components", {
+  skip_on_cran()
+
+  d <- sim_x(n = 300, seed = 313)
+  set.seed(1313)
+  d$y <- 2 * d$x1 + 2 * stats::rt(nrow(d), 3)
+
+  chain <- quick_control(num_trees = 20L, num_burn = 200L, num_draws = 200L)
+
+  # A larger concentration means more components, which is what it is for.
+  many <- bartisan(y ~ ., d, family = dpm(alpha = 50), control = chain)
+  few <- bartisan(y ~ ., d, family = dpm(alpha = 0.05), control = chain)
+  expect_gt(mean(many[["aux"]][, "clusters"]),
+            mean(few[["aux"]][, "clusters"]))
+})
+
+test_that("the interop methods work on a mixture fit", {
+  skip_if_not_installed("rstantools")
+  skip_on_cran()
+
+  d <- sim_x(n = 250, seed = 315)
+  set.seed(1315)
+  d$y <- 2 * d$x1 + 2 * stats::rt(nrow(d), 3)
+
+  fit <- bartisan(y ~ ., d, family = dpm(),
+                  control = quick_control(num_trees = 20L, num_burn = 200L,
+                                          num_draws = 200L))
+
+  # A replicate picks a component -- one of the occupied ones or a fresh draw
+  # from the baseline -- so its spread has to be at least the error
+  # distribution's and its centre near the fit's.
+  replicates <- rstantools::posterior_predict(fit)
+  expect_gt(stats::sd(as.vector(replicates)), stats::sigma(fit))
+  expect_lt(abs(mean(replicates) - mean(d$y)), 1)
+})
+
+test_that("the interop methods agree with what a mixture fit stores", {
+  skip_if_not_installed("rstantools")
+
+  d <- sim_x(n = 120, seed = 316)
+  set.seed(1316)
+  d$y <- 2 * d$x1 + 2 * stats::rt(nrow(d), 3)
+
+  fit <- bartisan(y ~ ., d, family = dpm(), control = quick_control())
+
+  replicates <- rstantools::posterior_predict(fit)
+  expect_identical(dim(replicates), c(30L, 120L))
+
+  expect_equal(stats::residuals(fit), d$y - stats::fitted(fit))
+  expect_identical(dim(rstantools::log_lik(fit)), c(30L, 120L))
+  expect_predictor_invariant(fit, d)
+})
+
+test_that("the error density carries a class and a plot method", {
+  d <- sim_x(n = 300, seed = 921)
+  set.seed(1921)
+  d$y <- 2 * d$x1 + stats::rt(nrow(d), 3)
+
+  fit <- bartisan(y ~ ., d, family = dpm(),
+                  control = quick_control(num_trees = 10L, num_burn = 100L,
+                                          num_draws = 100L))
+
+  out <- error_density(fit, at = seq(-3, 3, length.out = 21L))
+
+  expect_s3_class(out, "bartisan_error_density")
+  expect_s3_class(out, "data.frame")
+
+  # The class is on top of a data frame and changes nothing about using it as
+  # one, which is what drawing it against another density needs.
+  expect_identical(names(out), c("at", "mean", "lower", "upper"))
+  expect_identical(nrow(out), 21L)
+  expect_true(is.data.frame(out))
+
+  skip_if_not_installed("ggplot2")
+
+  expect_s3_class(plot(out), "ggplot")
+  expect_error(error_density(fit, plot = TRUE), "unused argument")
+
+  # And a subset of the grid is still something the method accepts.
+  expect_s3_class(plot(out[1:5, ]), "ggplot")
+})
+
+test_that("the reporting chart holds through a varying coefficient", {
+  skip_on_cran()
+
+  # `bcf()` fits through the varying-coefficient wrapper, which once left the
+  # shift at zero: the recorded predictor was the raw forest, whose level is the
+  # coordinate the likelihood does not identify, so levels wandered between runs
+  # while every contrast held. `_dev/dpm-level-shift.R` has the measurement.
+  set.seed(1309)
+  d <- data.frame(x = stats::runif(500, -1, 1),
+                  z = stats::rbinom(500, 1L, 0.5))
+  truth <- 10 * d$x^3 + 2 * d$z
+  d$y <- truth + 3 * (stats::rgamma(nrow(d), 1.5, 1.5) - 1)
+
+  fit <- bcf(y ~ x, treat = ~ z, data = d, family = dpm(), propensity = FALSE,
+             num_trees = c(40L, 10L), num_burn = 300L, num_draws = 300L)
+
+  on_link <- stats::predict(fit, type = "link")
+  eta <- stats::predict(fit, type = "link", draws = TRUE)
+
+  # The level is the identified sum, so it no longer follows the raw center.
+  level <- rowMeans(eta)
+  expect_lt(abs(stats::cor(level, fit[["aux"]][, "center"])), 0.8)
+  expect_lt(stats::sd(level), 0.5)
+  expect_lt(abs(mean(on_link - truth)), 0.5)
+})
+
+test_that("the reported likelihood and replay hold through a varying coefficient", {
+  set.seed(1312)
+  d <- data.frame(x = stats::runif(120, -1, 1),
+                  z = stats::rbinom(120, 1L, 0.5))
+  d$y <- 10 * d$x^3 + 2 * d$z + 3 * (stats::rgamma(nrow(d), 1.5, 1.5) - 1)
+
+  fit <- bcf(y ~ x, treat = ~ z, data = d, family = dpm(), propensity = FALSE,
+             control = quick_control(num_trees = c(5L, 3L)))
+
+  # The stored mixture is centered and the recorded predictor carries the
+  # shift, so the density at the recorded residuals reproduces the log
+  # likelihood the sampler computed in its own chart. With the shift dropped on
+  # the way through the wrapper the two disagree by thousands.
+  dens <- stats::predict(fit, type = "density", draws = TRUE, log = TRUE)
+  expect_equal(rowSums(dens), fit[["loglik"]], tolerance = 1e-8)
+
+  on_link <- stats::predict(fit, type = "link")
+  expect_identical(stats::predict(fit, type = "response"), on_link)
+
+  # And the stored forests, whose control function carries the shift in its
+  # leaves, replay to the recorded predictor.
+  eta <- stats::predict(fit, type = "link", draws = TRUE)
+  replayed <- stats::predict(fit, newdata = d, type = "link", draws = TRUE)
+  expect_equal(as.vector(replayed), as.vector(eta), tolerance = 1e-6)
+})
+
+test_that("the chart holds through a varying coefficient under dpm_aft() too", {
+  skip_on_cran()
+
+  set.seed(1311)
+  n <- 300L
+  d <- data.frame(x1 = stats::runif(n), x2 = stats::runif(n),
+                  z = stats::rbinom(n, 1L, 0.5))
+  lt <- 1 + d$x1 + 0.5 * d$z + 0.6 * (stats::rgamma(n, 1.5, 1.5) - 1)
+  cens <- log(stats::rexp(n, 1 / 8))
+  d$time <- exp(pmin(lt, cens))
+  d$event <- as.integer(lt <= cens)
+
+  fit <- bartisan(cbind(time, event) ~ x1 + x2 + vc(z), d, family = dpm_aft(),
+                  control = quick_control(num_trees = c(20L, 5L),
+                                          num_burn = 200L, num_draws = 200L))
+
+  eta <- stats::predict(fit, type = "link", draws = TRUE)
+  expect_lt(stats::sd(rowMeans(eta)), 0.2)
+})
+
+test_that("the reported likelihood and replay hold under dpm_aft() too", {
+  # `DPMAFTFamily` inherits `report_shift()` from `DPMFamily`, and the wrapper
+  # forwards whatever the wrapped family returns, so one fix covers both. The
+  # density identity is the check: a censored observation contributes the
+  # mixture's survival at the recorded residual, which the recorded log
+  # likelihood also used, so the two agree only in a shared chart.
+  set.seed(1317)
+  n <- 150L
+  d <- data.frame(x1 = stats::runif(n), x2 = stats::runif(n),
+                  z = stats::rbinom(n, 1L, 0.5))
+  lt <- 1 + d$x1 + 0.5 * d$z + 0.6 * (stats::rgamma(n, 1.5, 1.5) - 1)
+  cens <- log(stats::rexp(n, 1 / 8))
+  d$time <- exp(pmin(lt, cens))
+  d$event <- as.integer(lt <= cens)
+
+  fit <- bartisan(cbind(time, event) ~ x1 + x2 + vc(z), d, family = dpm_aft(),
+                  control = quick_control(num_trees = c(5L, 3L)))
+
+  dens <- stats::predict(fit, type = "density", draws = TRUE, log = TRUE)
+  expect_equal(rowSums(dens), fit[["loglik"]], tolerance = 1e-8)
+
+  eta <- stats::predict(fit, type = "link", draws = TRUE)
+  replayed <- stats::predict(fit, newdata = d, type = "link", draws = TRUE)
+  expect_equal(as.vector(replayed), as.vector(eta), tolerance = 1e-6)
+})

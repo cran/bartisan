@@ -1,0 +1,53 @@
+Package: bartisan
+Type: Package
+Title: Generalized Bayesian Additive Regression Trees
+Version: 0.1.0
+Authors@R: c(
+    person("Noah", "Greifer", role = c("aut", "cre", "cph"),
+           email = "noah.greifer@gmail.com",
+           comment = c(ORCID = "0000-0003-3067-7154")),
+    person("Antonio R.", "Linero", role = c("ctb", "cph"),
+           comment = "Author of FlexBart, the reference implementation of Linero (2025), from which the MCMC engine is adapted")
+    )
+Description: Fits Bayesian additive regression trees (BART) models for
+    likelihoods outside the conditionally conjugate Gaussian case, using the
+    Laplace-approximation reversible-jump sampler of Linero (2025)
+    <doi:10.1080/01621459.2024.2337156>. Supported response families include
+    Gaussian, binomial, Poisson, negative binomial, gamma, beta, ordered beta,
+    ordinal (cumulative link), multinomial, zero-inflated counts, a Tweedie
+    compound Poisson for a non-negative response with a point mass at zero,
+    accelerated failure time and proportional hazards models for right-censored
+    survival data, location-scale regression, and a Dirichlet process mixture
+    for the error distribution. Decision rules may be hard, as in standard BART, or
+    soft, as in the SoftBart model of Linero and Yang (2018)
+    <doi:10.1111/rssb.12293>, which yields smoother fits. The interface follows
+    that of glm(), so that a model is specified with a formula, a data frame,
+    and a family.
+License: GPL-2
+Encoding: UTF-8
+Depends: R (>= 4.1.0)
+Imports: arg (>= 0.2.1), cli (>= 3.6.4), rlang (>= 1.2.0), Matrix, Rcpp
+        (>= 1.1.2), parallel, reformulas (>= 0.4.4), ggplot2 (>=
+        4.0.1), stats, utils
+LinkingTo: Rcpp, RcppArmadillo
+Suggests: bayesplot, cobalt, collapse, future, future.apply, insight,
+        knitr, loo, MASS, marginaleffects, nlme, lme4, patrick (>=
+        0.3.0), performance, posterior, progressr, rmarkdown, rstanarm,
+        rstantools, survival, testthat (>= 3.0.0), WeightIt
+VignetteBuilder: knitr, rmarkdown
+URL: https://github.com/ngreifer/bartisan,
+        https://ngreifer.github.io/bartisan/
+BugReports: https://github.com/ngreifer/bartisan/issues
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.0
+LazyData: true
+NeedsCompilation: yes
+Packaged: 2026-10-18 18:33:17 UTC; NoahGreifer
+Author: Noah Greifer [aut, cre, cph] (ORCID:
+    <https://orcid.org/0000-0003-3067-7154>),
+  Antonio R. Linero [ctb, cph] (Author of FlexBart, the reference
+    implementation of Linero (2025), from which the MCMC engine is
+    adapted)
+Maintainer: Noah Greifer <noah.greifer@gmail.com>
+Repository: CRAN
+Date/Publication: 2026-10-28 11:40:07 UTC

@@ -1,0 +1,1342 @@
+#include <RcppArmadillo.h>
+#include <algorithm>
+#include <memory>
+#include <vector>
+#include "family.h"
+#include "hypers.h"
+#include "mcmc.h"
+#include "node.h"
+#include "random.h"
+
+// [[Rcpp::depends(RcppArmadillo)]]
+
+
+using namespace Rcpp;
+using namespace bartisan;
+
+namespace {
+
+// Trees are stored for later prediction as a preorder sequence of five-number
+// records: whether the node is a leaf, its splitting variable, its cutpoint,
+// what its rule does with a missing value, and its leaf value. A branch's two
+// subtrees follow it immediately, so decoding is a single pass with a cursor.
+// Fixed part of one node's record. A categorical rule appends its level mask
+// after it, so records are variable length; the reader advances by whatever it
+// consumed, and nothing outside this file parses the encoding -- R only
+// concatenates the vectors and shifts the tree offsets.
+const int RECORD_SIZE = 6;
+
+// `leaf_shift` is subtracted from every leaf value as the tree is written out.
+// A tree's membership weights sum to one for every observation, so subtracting
+// the same amount from all of its leaves moves that tree's contribution to the
+// predictor by exactly that amount -- which is how a whole forest is recentered
+// by 1/num_trees of the shift per tree. See Family::report_shift().
+void encode_tree(const Node* node, std::vector<double>& out,
+                 double leaf_shift) {
+  int words = node->is_leaf ? 0 : static_cast<int>(node->mask.size());
+
+  out.push_back(node->is_leaf ? 1.0 : 0.0);
+  out.push_back(static_cast<double>(node->var));
+  out.push_back(node->val);
+  out.push_back(static_cast<double>(node->na_rule));
+  out.push_back(node->mu - leaf_shift);
+  out.push_back(static_cast<double>(words));
+
+  // A word is 32 bits, which a double holds exactly.
+  for (int w = 0; w < words; w++) {
+    out.push_back(static_cast<double>(node->mask[w]));
+  }
+
+  if (!node->is_leaf) {
+    encode_tree(node->left, out, leaf_shift);
+    encode_tree(node->right, out, leaf_shift);
+  }
+}
+
+// Both subtrees are always walked, even when a hard rule gives one of them zero
+// weight, so that the cursor advances past the whole tree exactly once.
+double eval_tree(const double* record, int& pos, const arma::mat& X,
+                 const arma::imat& codes, int i, double weight,
+                 double bandwidth, bool soft, int gate) {
+  bool leaf = record[pos] > 0.5;
+  int var = static_cast<int>(record[pos + 1]);
+  double val = record[pos + 2];
+  int na_rule = static_cast<int>(record[pos + 3]);
+  double mu = record[pos + 4];
+  int words = static_cast<int>(record[pos + 5]);
+  const double* mask_at = record + pos + RECORD_SIZE;
+  pos += RECORD_SIZE + words;
+
+  if (leaf) {
+    return weight * mu;
+  }
+
+  double g;
+
+  if (words > 0) {
+    int level = codes(i, var);
+
+    if (level < 0) {
+      g = na_rule == NA_RIGHT ? 0.0 : 1.0;
+    }
+    else if (na_rule == NA_ONLY) {
+      g = 0.0;
+    }
+    else {
+      std::uint32_t word =
+        static_cast<std::uint32_t>(mask_at[static_cast<std::size_t>(level) >> 5]);
+      g = ((word >> (level & 31)) & 1u) ? 1.0 : 0.0;
+    }
+  }
+  else {
+    g = left_prob(X(i, var), val, bandwidth, soft, na_rule, gate);
+  }
+
+  double left = eval_tree(record, pos, X, codes, i, weight * g, bandwidth, soft,
+                          gate);
+  double right = eval_tree(record, pos, X, codes, i, weight * (1.0 - g),
+                           bandwidth, soft, gate);
+  return left + right;
+}
+
+// The sampler passes forests around as vectors of raw pointers, so ownership
+// has to be released by hand. Doing it in a destructor rather than at the end of
+// the fit covers the paths that do not reach the end: the interrupt the sampler
+// checks for every iteration, and the error a family whose log density is an R
+// function can raise.
+struct ForestGuard {
+  std::vector<std::vector<Tree*>>& forests;
+
+  ~ForestGuard() {
+    for (std::size_t h = 0; h < forests.size(); h++) {
+      for (std::size_t t = 0; t < forests[h].size(); t++) {
+        delete forests[h][t];
+      }
+      forests[h].clear();
+    }
+  }
+};
+
+template <typename T>
+List wrap_matrices(const std::vector<T>& x) {
+  List out(x.size());
+  for (std::size_t h = 0; h < x.size(); h++) {
+    out[h] = wrap(x[h]);
+  }
+  return out;
+}
+
+} // namespace
+
+//' Fit a generalized BART model
+//'
+//' The workhorse behind [bartisan()]. Not intended to be called directly: it
+//' assumes the design matrix has already been mapped to the unit interval and
+//' the response already coerced to the form the requested family expects.
+//'
+//' @param X a design matrix with entries in `[0, 1]`, possibly with `NA`.
+//' @param has_na `logical`; one entry per column of `X` saying whether that
+//'   column contains a missing value. A rule on a column with none is not given
+//'   a missing-value branch, so complete data reproduces the sampler exactly as
+//'   it was.
+//' @param y the response, coerced by the calling family.
+//' @param weights `numeric`; the prior weights.
+//' @param offset an `H` by `N` matrix of fixed contributions to the additive
+//'   predictors.
+//' @param group_probs_parts a sparse matrix whose columns are predictor groups,
+//'   as the parts of a `dgCMatrix`; see `sparse_from_parts()`.
+//' @param family_name,link,family_opts the family specification.
+//' @param control a list of sampler and prior settings.
+//' @returns A list of posterior draws and the encoded forests.
+//' @noRd
+// [[Rcpp::export(.bartisan_fit)]]
+List bartisan_fit(const arma::mat& X, const arma::uvec& has_na,
+                 const arma::vec& y,
+                 const arma::vec& weights, const arma::mat& offset,
+                 const List& group_probs_parts, std::string family_name,
+                 std::string link, List family_opts, List control,
+                 List random_spec, const arma::imat& codes,
+                 const arma::ivec& cat_col, const arma::ivec& n_levels,
+                 const arma::mat& vc_basis) {
+
+  const arma::sp_mat group_probs = sparse_from_parts(group_probs_parts);
+  int n = static_cast<int>(X.n_rows);
+
+  if (has_na.n_elem != X.n_cols) {
+    stop("`has_na` must have one value per column of `X`.");
+  }
+
+  std::unique_ptr<Family> family(make_family(family_name, link, y, weights,
+                                             family_opts, vc_basis));
+
+  // The probit likelihood is the margin of a Gaussian one, and working with the
+  // Gaussian makes the target quadratic in the predictor -- which is worth a
+  // large constant factor. Only for Bernoulli data, where a single latent per
+  // observation carries the whole likelihood.
+  std::vector<std::string> augment;
+
+  if (control.containsElementNamed("augment")) {
+    augment = as<std::vector<std::string>>(control["augment"]);
+  }
+
+  // Whether a rewriting was actually applied, rather than merely allowed. The
+  // control's `augment` names the families it may apply to; whether one of them
+  // is the family here, and whether the data meet what the rewriting needs -- a
+  // Bernoulli response, single trials -- is settled only at this point, so it
+  // is reported back rather than inferred in R.
+  bool augmented = false;
+
+  if (!augment.empty()) {
+    Family* rewritten = augmented_family(family_name, link, y, weights,
+                                         family_opts, augment, vc_basis);
+
+    if (rewritten != nullptr) {
+      family.reset(rewritten);
+      augmented = true;
+    }
+  }
+
+  // Asked here rather than where the wrapper is built, because augmentation can
+  // replace a non-quadratic target with a quadratic one and the drawn coding
+  // only needs the family that actually reaches the sampler to be quadratic.
+  // That is what lets a logit or probit binomial have its coding drawn.
+  int bad_coding = family->coding_not_exact();
+
+  if (bad_coding >= 0) {
+    std::string which = "this family's";
+
+    if (family_opts.containsElementNamed("vc_labels") &&
+        !Rf_isNull(family_opts["vc_labels"])) {
+      std::vector<std::string> labels =
+        as<std::vector<std::string> >(family_opts["vc_labels"]);
+
+      if (bad_coding < static_cast<int>(labels.size())) {
+        which = "`" + labels[bad_coding] + "`'s";
+      }
+    }
+
+    // The wording matters: `bcf()` recognizes this refusal by the phrase "leaf
+    // target is quadratic" so that it can fall back to a fixed coding rather
+    // than pass the failure on. Keep that phrase intact.
+    stop("`center = \"estimate\"` needs a family whose leaf target is "
+         "quadratic in the additive predictor, and %s is not. Use a fixed "
+         "`center` there.", which.c_str());
+  }
+
+  int H = family->H;
+
+  if (static_cast<int>(offset.n_rows) != H ||
+      static_cast<int>(offset.n_cols) != n) {
+    stop("`offset` must be a %d by %d matrix.", H, n);
+  }
+
+  // One tree count per additive predictor. A single value is recycled by
+  // `bartisan()` before it gets here, so this is always length H. The forests
+  // are stored back to back rather than as a rectangle, so a per-forest offset
+  // is what indexes them.
+  std::vector<int> num_trees = as<std::vector<int>>(control["num_trees"]);
+
+  if (static_cast<int>(num_trees.size()) != H) {
+    stop("`control$num_trees` must have one value per additive predictor (%d).",
+         H);
+  }
+
+  // The trailing forests may be nuisance parameters rather than predictors:
+  // pinned at depth zero so that each is a single scalar, and reported in `aux`
+  // rather than in `eta`. `n_report` is how many forests the caller asked for.
+  int n_pinned = family->num_pinned();
+  int n_report = H - n_pinned;
+
+  std::vector<int> tree_offset(H + 1, 0);
+  for (int h = 0; h < H; h++) {
+    tree_offset[h + 1] = tree_offset[h] + num_trees[h];
+  }
+  // Pooled splitting proportions across the forests. Only does anything with
+  // more than one forest and with the sparsity prior on, and the forests have
+  // to agree about which groups they may split on, since a pooled Dirichlet
+  // over different supports is not one distribution.
+  bool share_sparsity = control.containsElementNamed("share_sparsity") &&
+    as<bool>(control["share_sparsity"]);
+  bool share_forests = control.containsElementNamed("share_forests") &&
+    as<bool>(control["share_forests"]);
+
+  int num_burn = as<int>(control["num_burn"]);
+  int num_thin = as<int>(control["num_thin"]);
+  int num_draws = as<int>(control["num_draws"]);
+  int num_print = as<int>(control["num_print"]);
+  bool verbose = as<bool>(control["verbose"]);
+
+  // Progress reported back to R rather than printed here, so that whatever the
+  // caller has set up renders it -- a *progressr* handler, typically. Absent
+  // unless R put a function in `control$progress`, and then called at a bounded
+  // rate rather than every sweep: the call itself is cheap next to a sweep, but
+  // a handler that redraws a bar is not, and one tick per sweep would make the
+  // reporting cost more than the sampling.
+  //
+  // Safe from here even though it re-enters R: an interrupt or an error raised
+  // by the callback unwinds through `ForestGuard`, which is what already covers
+  // the interrupt the loops below check for.
+  std::unique_ptr<Rcpp::Function> progress;
+
+  if (control.containsElementNamed("progress") &&
+      Rf_isFunction(control["progress"])) {
+    progress.reset(new Rcpp::Function(as<Rcpp::Function>(control["progress"])));
+  }
+
+  // The interval that gives `progress_ticks` reports over the whole run, which
+  // is what the R side sized the progressor for. Both loops step by it, so the
+  // number of calls matches what R promised no matter how warmup and sampling
+  // divide the total.
+  int progress_ticks = 0;
+
+  if (progress && control.containsElementNamed("progress_ticks")) {
+    progress_ticks = as<int>(control["progress_ticks"]);
+  }
+
+  long long progress_total =
+    static_cast<long long>(num_burn) +
+    static_cast<long long>(num_draws) * static_cast<long long>(num_thin);
+  long long progress_every =
+    progress_ticks > 0
+      ? std::max<long long>(1, progress_total / progress_ticks)
+      : 0;
+  long long progress_done = 0;
+  long long progress_sent = 0;
+
+  // One sweep's worth of progress. `step` is how many sweeps the caller just
+  // did, which is 1 in warmup and `num_thin` per retained draw.
+  auto tick = [&](long long step) {
+    if (progress_every <= 0) {
+      return;
+    }
+
+    progress_done += step;
+
+    while (progress_sent < progress_ticks &&
+           progress_done >= (progress_sent + 1) * progress_every) {
+      progress_sent++;
+      (*progress)();
+    }
+  };
+  bool soft = as<bool>(control["soft"]);
+  int gate = as<int>(control["gate"]);
+
+  // Settings that mean something different for each forest. R sends one value
+  // per forest, so a scalar the caller gave once has already been spread and
+  // this side never has to decide what recycling would mean. Both readers
+  // tolerate a length-one vector so that a control list assembled by hand -- as
+  // the entry points are called in tests -- still works.
+  auto at = [&](const char* name, int h) {
+    arma::vec v = as<arma::vec>(control[name]);
+    return v(v.n_elem == 1 ? 0 : h);
+  };
+  auto flag_at = [&](const char* name, int h) {
+    Rcpp::LogicalVector v = control[name];
+    return static_cast<bool>(v[v.size() == 1 ? 0 : h]);
+  };
+
+  // One leaf scale per additive predictor, since a location-scale model puts
+  // its two predictors on quite different scales.
+  arma::vec sigma_mu_target = as<arma::vec>(control["sigma_mu"]);
+
+  if (static_cast<int>(sigma_mu_target.n_elem) != H) {
+    stop("`control$sigma_mu` must have one value per additive predictor (%d).",
+         H);
+  }
+
+  // Linero (2025), Remark 2: raising sigma_mu from near zero over the first
+  // part of burn-in is described as essential, because starting it at a large
+  // value can leave the sampler stuck away from the stationary distribution.
+  double ramp_fraction = as<double>(control["sigma_mu_ramp"]);
+  int num_ramp = static_cast<int>(std::floor(ramp_fraction * num_burn));
+
+  // Both are empty unless there is something to say, and both are one column per
+  // forest of one value per predictor group.
+  //
+  // `split_prior` is weights the caller fixed, already normalized in R, and
+  // fixing them stops anything drawing them. `split_mask` is which groups a
+  // forest may split on at all, from its own formula, and leaves the drawing
+  // alone. They were one matrix once, which meant a `vc()` term naming fewer
+  // moderators than there are covariates silently turned the sparsity prior off.
+  arma::mat split_prior;
+  arma::mat split_mask;
+
+  auto forest_matrix = [&](const char* name) {
+    arma::mat out;
+
+    if (control.containsElementNamed(name) && !Rf_isNull(control[name])) {
+      out = as<arma::mat>(control[name]);
+
+      if (static_cast<int>(out.n_cols) != H) {
+        stop("`control$%s` must have one column per forest (%d).", name, H);
+      }
+    }
+
+    return out;
+  };
+
+  split_prior = forest_matrix("split_prior");
+  split_mask = forest_matrix("split_mask");
+
+  std::vector<std::unique_ptr<Hypers>> hypers;
+  std::vector<std::vector<Tree*>> forests(H);
+  ForestGuard guard = {forests};
+
+  // Whether each categorical group has a missing level, asked once here rather
+  // than by every rule proposal; see Tree::codes_has_na.
+  arma::uvec codes_has_na(codes.n_cols, arma::fill::zeros);
+
+  for (arma::uword j = 0; j < codes.n_cols; j++) {
+    codes_has_na(j) = arma::any(codes.col(j) < 0) ? 1u : 0u;
+  }
+
+  for (int h = 0; h < H; h++) {
+    // A pinned forest gets a branching probability of zero, which makes every
+    // birth proposal impossible, and a fixed leaf scale, because one leaf cannot
+    // identify a scale of its own -- left to draw it, `sigma_mu` wanders over an
+    // order of magnitude.
+    bool pinned = h >= n_report;
+    hypers.push_back(std::unique_ptr<Hypers>(new Hypers(
+      group_probs, sigma_mu_target(h),
+      pinned ? 0.0 : at("gamma", h),
+      at("beta", h), at("alpha", h),
+      at("alpha_scale", h), at("alpha_shape_1", h),
+      at("alpha_shape_2", h), pinned ? false : flag_at("update_sigma_mu", h),
+      flag_at("update_s", h), flag_at("update_alpha", h), soft,
+      at("bandwidth", h),
+      flag_at("update_bandwidth", h),
+      static_cast<int>(at("bandwidth_every", h)), gate,
+      split_prior.n_cols > 0 ? arma::vec(split_prior.col(h)) : arma::vec(),
+      split_mask.n_cols > 0 ? arma::vec(split_mask.col(h)) : arma::vec())));
+
+    for (int t = 0; t < num_trees[h]; t++) {
+      forests[h].push_back(new Tree(hypers[h].get(), &X, &has_na, &codes,
+                                    &cat_col, &n_levels, &codes_has_na));
+    }
+  }
+
+  if (share_sparsity) {
+    if (H < 2) {
+      share_sparsity = false;
+    }
+    else {
+      // A pooled Dirichlet has to be over one support. Two forests that may
+      // split on different groups, which is what a per-forest formula gives,
+      // do not have one, and silently pooling them would hand a forest weight
+      // on a group its own formula never named. Checked over the forests that
+      // will actually share, which are the ones drawing their proportions.
+      int lead = -1;
+
+      for (int h = 0; h < H; h++) {
+        if (!hypers[h]->update_s) {
+          continue;
+        }
+        if (lead < 0) {
+          lead = h;
+        }
+        else if (!hypers[lead]->same_allowed(*hypers[h])) {
+          stop("`share_sparsity` needs the forests that share to be able to "
+               "split on the same predictors, and forest %d cannot split on "
+               "what forest %d can. Give every additive predictor the same "
+               "formula, or leave `share_sparsity` off.", h + 1, lead + 1);
+        }
+      }
+    }
+  }
+
+  // Which additive predictors share a topology, in order, with the first
+  // leading. Every reported forest takes part -- a varying coefficient's forest
+  // as much as a second parameter's, since both are forests over the same
+  // predictors and the user asked for one partition, not one per kind. Pinned
+  // forests are left out: a forest held at a single leaf has no topology to
+  // share, and its branching probability is zero, so a shared birth would be
+  // impossible for the whole group.
+  std::vector<int> share_members;
+
+  if (share_forests) {
+    if (n_report < 2) {
+      share_forests = false;
+    }
+    else {
+      for (int h = 0; h < n_report; h++) {
+        share_members.push_back(h);
+      }
+
+      const Hypers& lead = *hypers[share_members[0]];
+
+      for (std::size_t k = 1; k < share_members.size(); k++) {
+        int h = share_members[k];
+        const Hypers& other = *hypers[h];
+
+        // One topology means one set of rules, and a rule names a predictor.
+        // Forests that may split on different predictors have no common set of
+        // rules to hold, so there is nothing here to share.
+        if (!lead.same_allowed(other)) {
+          stop("`share_forests` needs every forest to be able to split on the "
+               "same predictors, and forest %d cannot split on what forest %d "
+               "can. Give every additive predictor the same formula, or leave "
+               "`share_forests` off.", h + 1, share_members[0] + 1);
+        }
+
+        // The rest are settings that describe the topology rather than the
+        // values hanging off it, so a shared topology can only have one of
+        // each. The leaf scale is deliberately not among them: that is what
+        // each component keeps.
+        if (num_trees[h] != num_trees[share_members[0]]) {
+          stop("`share_forests` needs every forest to have the same number of "
+               "trees, because the trees are shared, but forest %d has %d and "
+               "forest %d has %d.", h + 1, num_trees[h], share_members[0] + 1,
+               num_trees[share_members[0]]);
+        }
+
+        if (other.gamma != lead.gamma || other.beta != lead.beta) {
+          stop("`share_forests` needs every forest to have the same `gamma` "
+               "and `beta`, because one topology has one prior over its shape, "
+               "but forest %d and forest %d differ.", h + 1,
+               share_members[0] + 1);
+        }
+
+        if (other.update_s != lead.update_s) {
+          stop("`share_forests` needs every forest to have the same `sparsity` "
+               "setting, because one topology draws its rules from one set of "
+               "splitting proportions, but forest %d and forest %d differ.",
+               h + 1, share_members[0] + 1);
+        }
+
+        if (other.bandwidth_scale != lead.bandwidth_scale ||
+            other.update_bandwidth != lead.update_bandwidth ||
+            other.bandwidth_every != lead.bandwidth_every) {
+          stop("`share_forests` needs every forest to have the same "
+               "`bandwidth` settings, because a gate's width decides how the "
+               "shared support divides, but forest %d and forest %d differ.",
+               h + 1, share_members[0] + 1);
+        }
+      }
+    }
+  }
+
+  // One topology draws its rules from one set of splitting proportions, so a
+  // shared forest pools them by construction and there is nothing left for
+  // `share_sparsity` to do. Turning it off here rather than reading both flags
+  // everywhere below keeps one statement of that fact.
+  if (share_forests) {
+    share_sparsity = false;
+  }
+
+  arma::mat eta = offset;
+  // Forcing the blocked evaluation path lets the test suite check that it
+  // reproduces the per-observation path exactly.
+  bool block_eval = control.containsElementNamed("block_eval") &&
+    as<bool>(control["block_eval"]);
+
+  Context ctx(family.get(), &eta, block_eval);
+
+  // The closed forms a quadratic target allows can be switched off, so that the
+  // test suite can check they reproduce the general path.
+  if (control.containsElementNamed("exact_quadratic")) {
+    ctx.exact_quadratic = as<bool>(control["exact_quadratic"]);
+  }
+
+  if (control.containsElementNamed("generic_accumulate")) {
+    ctx.generic_accumulate = as<bool>(control["generic_accumulate"]);
+  }
+
+  int num_groups = static_cast<int>(group_probs.n_cols);
+  std::vector<std::string> aux_names = family->aux_names();
+  int num_aux = static_cast<int>(aux_names.size());
+
+  std::vector<arma::mat> eta_out(n_report,
+                                 arma::mat(num_draws, n, arma::fill::zeros));
+  std::vector<arma::umat> counts(n_report, arma::umat(num_draws, num_groups,
+                                                     arma::fill::zeros));
+  arma::mat sigma_mu_out(num_draws, n_report, arma::fill::zeros);
+  arma::mat aux_out(num_draws, std::max(num_aux, 1), arma::fill::zeros);
+  arma::mat bandwidth_out(num_draws, std::max(tree_offset[n_report], 1),
+                          arma::fill::zeros);
+  arma::vec loglik_out(num_draws, arma::fill::zeros);
+
+  std::vector<double> forest_flat;
+  std::vector<int> tree_start;
+  tree_start.push_back(0);
+
+  // A family whose own state has a different size at every draw -- a Dirichlet
+  // process mixture -- reports it the same way, flat with per-draw offsets.
+  std::vector<double> mixture_flat;
+  std::vector<int> mixture_start;
+  mixture_start.push_back(0);
+
+  // Group-level random intercepts, one set per additive predictor. The prior
+  // scale starts at, and is given a half-Cauchy prior with, the same value the
+  // leaf scale uses, so a group effect and a tree's leaf are shrunk on the same
+  // footing.
+  arma::ivec vc_column;
+
+  if (vc_basis.n_cols > 0 && family_opts.containsElementNamed("vc_column") &&
+      !Rf_isNull(family_opts["vc_column"])) {
+    vc_column = as<arma::ivec>(family_opts["vc_column"]);
+  }
+
+  std::unique_ptr<RandomEffects> ranef =
+    make_random_effects(random_spec, H, sigma_mu_target(0),
+                        as<bool>(control["update_tau"]), &X, vc_column);
+
+  int num_ranef = 0;
+
+  if (!ranef->empty()) {
+    for (std::size_t r = 0; r < ranef->terms[0].size(); r++) {
+      num_ranef += ranef->terms[0][r]->num_levels;
+    }
+  }
+
+  std::vector<arma::mat> ranef_out(
+    ranef->empty() ? 0 : H, arma::mat(num_draws, std::max(num_ranef, 1),
+                                      arma::fill::zeros));
+  std::vector<arma::mat> tau_out(
+    ranef->empty() ? 0 : H,
+    arma::mat(num_draws, ranef->empty() ? 1 : ranef->terms[0].size(),
+              arma::fill::zeros));
+
+  auto sweep = [&]() {
+    // A shared topology cannot be swept a forest at a time: one move has to be
+    // weighed against every component it touches, so the components that share
+    // are done together and the ones that do not -- a family's pinned nuisance
+    // forests -- follow in the ordinary way.
+    int first_alone = 0;
+
+    if (share_forests) {
+      for (std::size_t k = 0; k < share_members.size(); k++) {
+        int h = share_members[k];
+        family->run_before_forest(h, eta);
+      }
+
+      update_shared_forests(forests, share_members, ctx, hypers);
+
+      for (std::size_t k = 0; k < share_members.size(); k++) {
+        int h = share_members[k];
+        ctx.h = h;
+        ctx.form = family->target_form(h);
+        ctx.quadratic = family->is_quadratic(h);
+        ctx.sigma_mu = hypers[h]->sigma_mu;
+        ranef->update(ctx, h);
+      }
+
+      first_alone = n_report;
+    }
+
+    for (int h = first_alone; h < H; h++) {
+      ctx.h = h;
+      ctx.form = family->target_form(h);
+      ctx.quadratic = family->is_quadratic(h);
+      family->run_before_forest(h, eta);
+      update_forest(forests[h], ctx, *hypers[h], !share_sparsity);
+      // After the forest, so that the intercepts are drawn against the
+      // predictor the trees have just settled on rather than the one before it.
+      ranef->update(ctx, h);
+    }
+
+    // After every forest has moved, so the pooled counts are this sweep's.
+    if (share_sparsity) {
+      update_shared_s(forests, hypers);
+    }
+
+    family->run_update_aux(eta);
+
+    // Every sweep tells the family twice over: `before_forest()` for each
+    // forest and `update_aux()` once. The count is kept by the innermost
+    // family through whatever wraps it, so a wrapper that drops a hook fails
+    // here on the first sweep rather than shrinking an effect quietly.
+    if (!family->sweep_delivered()) {
+      stop("a sweep ended without the family being told of it: a wrapper "
+           "dropped before_forest() or update_aux()");
+    }
+  };
+
+  if (verbose) {
+    Rcout << "Running " << num_burn << " warmup and " << num_draws * num_thin
+          << " sampling iterations\n";
+  }
+
+  for (int h = 0; h < H; h++) {
+    hypers[h]->adapt = true;
+  }
+
+  for (int iter = 0; iter < num_burn; iter++) {
+    if (iter < num_ramp) {
+      double fraction = static_cast<double>(iter + 1) /
+        static_cast<double>(num_ramp);
+      for (int h = 0; h < H; h++) {
+        hypers[h]->sigma_mu = sigma_mu_target(h) * fraction;
+        hypers[h]->update_sigma_mu = false;
+      }
+      for (int h = n_report; h < H; h++) {
+        // A pinned forest is not ramped: its scale is a prior the caller set,
+        // not something the sampler is working its way towards.
+        hypers[h]->sigma_mu = sigma_mu_target(h);
+      }
+    }
+    else if (iter == num_ramp) {
+      // The ramp is over, so hand the leaf scale back to its own update for the
+      // rest of warmup. Without this the update stays switched off for every
+      // remaining warmup iteration, because the block above is the only thing
+      // that ever touches the flag and the restore below the loop does not run
+      // until warmup has finished. The scale then took its first draw at the
+      // first retained iteration, jumping from the ramp target to wherever the
+      // leaves wanted it, and the trees spent the sampling phase equilibrating
+      // to the new scale: `sigma_mu` drifted across the retained draws and its
+      // rhat came out between 1.2 and 1.9 on ordinary data.
+      //
+      // Fires only when the ramp is shorter than warmup. With
+      // `sigma_mu_ramp = 1` there is no iteration left for it and the restore
+      // below the loop is still what puts the scale back.
+      for (int h = 0; h < H; h++) {
+        hypers[h]->update_sigma_mu =
+          h < n_report ? flag_at("update_sigma_mu", h) : false;
+      }
+    }
+
+    sweep();
+    Rcpp::checkUserInterrupt();
+    tick(1);
+
+    if (verbose && num_print > 0 && (iter + 1) % num_print == 0) {
+      Rcout << "\rWarmup " << iter + 1 << " / " << num_burn << "        ";
+    }
+  }
+  if (verbose && num_burn > 0) {
+    Rcout << "\n";
+  }
+
+  // Put the leaf scale at its target and hand it back to its own update, and
+  // freeze the tuned proposals, before any draw is retained. Restoring here
+  // rather than inside the loop matters when the ramp spans the whole of warmup,
+  // where a restore conditioned on reaching iteration num_ramp never fires and
+  // would leave the leaf scale pinned for the entire sampling phase.
+  for (int h = 0; h < H; h++) {
+    hypers[h]->sigma_mu = sigma_mu_target(h);
+    hypers[h]->update_sigma_mu =
+      h < n_report ? flag_at("update_sigma_mu", h) : false;
+    hypers[h]->adapt = false;
+  }
+
+  for (int iter = 0; iter < num_draws; iter++) {
+    for (int j = 0; j < num_thin; j++) {
+      sweep();
+    }
+    Rcpp::checkUserInterrupt();
+    tick(num_thin);
+
+    // The chart the draw is recorded in may differ from the one the sampler
+    // works in; for every family but the ordinal ones this is zero.
+    arma::vec shift = family->report_shift(eta);
+
+    for (int h = 0; h < n_report; h++) {
+      eta_out[h].row(iter) = eta.row(h) - shift(h);
+      sigma_mu_out(iter, h) = hypers[h]->sigma_mu;
+
+      arma::uvec var_counts = arma::zeros<arma::uvec>(num_groups);
+      double per_tree = static_cast<double>(num_trees[h]);
+
+      for (int t = 0; t < num_trees[h]; t++) {
+        get_var_counts(forests[h][t]->root, var_counts);
+        bandwidth_out(iter, tree_offset[h] + t) = forests[h][t]->bandwidth;
+        encode_tree(forests[h][t]->root, forest_flat, shift(h) / per_tree);
+        tree_start.push_back(static_cast<int>(forest_flat.size()));
+      }
+      counts[h].row(iter) = var_counts.t();
+    }
+
+    if (num_aux > 0) {
+      aux_out.row(iter) = family->aux_values_shifted(shift).t();
+    }
+
+    {
+      arma::vec drawn = family->mixture_flat();
+
+      for (arma::uword k = 0; k < drawn.n_elem; k++) {
+        mixture_flat.push_back(drawn(k));
+      }
+
+      mixture_start.push_back(static_cast<int>(mixture_flat.size()));
+    }
+
+    for (std::size_t h = 0; h < ranef_out.size(); h++) {
+      // `column` rather than `at`, which is the name of the per-forest flag
+      // reader this function uses throughout and would otherwise be shadowed
+      // here.
+      int column = 0;
+
+      for (std::size_t r = 0; r < ranef->terms[h].size(); r++) {
+        arma::vec b = ranef->terms[h][r]->values();
+        ranef_out[h](iter, arma::span(column, column + b.n_elem - 1)) = b.t();
+        tau_out[h](iter, r) = ranef->terms[h][r]->tau;
+        column += static_cast<int>(b.n_elem);
+      }
+    }
+    loglik_out(iter) = family->reported_loglik(eta);
+
+    if (verbose && num_print > 0 && (iter + 1) % num_print == 0) {
+      Rcout << "\rSampling " << iter + 1 << " / " << num_draws << "        ";
+    }
+  }
+  if (verbose && num_draws > 0) {
+    Rcout << "\n";
+  }
+
+  List out;
+  out["eta"] = wrap_matrices(eta_out);
+  out["counts"] = wrap_matrices(counts);
+  out["sigma_mu"] = sigma_mu_out;
+  out["bandwidth"] = bandwidth_out;
+  out["loglik"] = loglik_out;
+  out["forest_flat"] = forest_flat;
+  out["tree_start"] = tree_start;
+
+  if (!mixture_flat.empty()) {
+    out["mixture_flat"] = mixture_flat;
+    out["mixture_start"] = mixture_start;
+  }
+  out["augmented"] = augmented;
+  out["num_forest"] = n_report;
+  out["num_trees"] = std::vector<int>(num_trees.begin(),
+                                      num_trees.begin() + n_report);
+
+  if (num_aux > 0) {
+    out["aux"] = aux_out;
+    out["aux_names"] = aux_names;
+  }
+
+  if (!ranef->empty()) {
+    out["ranef"] = wrap_matrices(ranef_out);
+    out["tau"] = wrap_matrices(tau_out);
+  }
+
+  return out;
+}
+
+// Whether one encoded tree has an internal node splitting on any of the given
+// columns. Walks the records with the same cursor `eval_tree()` uses, but takes
+// both subtrees unconditionally: this is a property of the tree rather than of
+// any observation, so there is no gate to follow.
+//
+// A rule with a level mask indexes `codes`, and one without indexes `X`, so the
+// two kinds of column are looked up in separate sets rather than in one.
+bool tree_splits_on(const double* record, int& pos,
+                    const std::vector<char>& numeric_wanted,
+                    const std::vector<char>& categorical_wanted) {
+  bool leaf = record[pos] > 0.5;
+  int var = static_cast<int>(record[pos + 1]);
+  int words = static_cast<int>(record[pos + 5]);
+  pos += RECORD_SIZE + words;
+
+  if (leaf) {
+    return false;
+  }
+
+  bool here = false;
+
+  if (words > 0) {
+    if (var >= 0 && var < static_cast<int>(categorical_wanted.size())) {
+      here = categorical_wanted[var] != 0;
+    }
+  }
+  else if (var >= 0 && var < static_cast<int>(numeric_wanted.size())) {
+    here = numeric_wanted[var] != 0;
+  }
+
+  // Both subtrees are walked whatever this node said, because the cursor has to
+  // reach the end of the record either way for the caller to continue.
+  bool left = tree_splits_on(record, pos, numeric_wanted, categorical_wanted);
+  bool right = tree_splits_on(record, pos, numeric_wanted, categorical_wanted);
+
+  return here || left || right;
+}
+
+//' Which stored trees split on a given set of predictor columns
+//'
+//' A sum of trees is separable, so a tree that never splits on a column
+//' contributes the same amount however that column is set. Partial dependence
+//' evaluates one column over a grid with the rest of the data held fixed, so the
+//' trees this marks out are the only ones that have to be re-evaluated at each
+//' grid point; the rest are evaluated once.
+//'
+//' @param forest_flat,tree_start the encoded forests returned by
+//'   `.bartisan_fit()`.
+//' @param num_forest,num_trees,num_draws `integer`; the dimensions of the
+//'   stored chain.
+//' @param num_cols `integer`; the zero-based columns of the design matrix to
+//'   look for, for rules without a level mask.
+//' @param cat_cols `integer`; the zero-based columns of the level-code matrix to
+//'   look for, for rules with one.
+//' @returns A `logical` vector with one entry per stored tree, in the order the
+//'   flat encoding holds them, which is iteration-major and then forest and then
+//'   tree.
+//' @noRd
+// [[Rcpp::export(.bartisan_tree_uses)]]
+LogicalVector bartisan_tree_uses(const std::vector<double>& forest_flat,
+                                 const std::vector<int>& tree_start,
+                                 int num_forest,
+                                 const std::vector<int>& num_trees,
+                                 int num_draws,
+                                 const std::vector<int>& num_cols,
+                                 const std::vector<int>& cat_cols) {
+
+  if (static_cast<int>(num_trees.size()) != num_forest) {
+    stop("`num_trees` must have one value per forest.");
+  }
+
+  int total_trees = 0;
+  for (int h = 0; h < num_forest; h++) {
+    total_trees += num_trees[h];
+  }
+
+  // Membership as a lookup on the column index rather than a search per node:
+  // a tree is walked once per call and a node asks this question once.
+  int n_numeric = 0;
+  for (std::size_t k = 0; k < num_cols.size(); k++) {
+    n_numeric = std::max(n_numeric, num_cols[k] + 1);
+  }
+
+  int n_categorical = 0;
+  for (std::size_t k = 0; k < cat_cols.size(); k++) {
+    n_categorical = std::max(n_categorical, cat_cols[k] + 1);
+  }
+
+  std::vector<char> numeric_wanted(n_numeric, 0);
+  for (std::size_t k = 0; k < num_cols.size(); k++) {
+    if (num_cols[k] >= 0) {
+      numeric_wanted[num_cols[k]] = 1;
+    }
+  }
+
+  std::vector<char> categorical_wanted(n_categorical, 0);
+  for (std::size_t k = 0; k < cat_cols.size(); k++) {
+    if (cat_cols[k] >= 0) {
+      categorical_wanted[cat_cols[k]] = 1;
+    }
+  }
+
+  int n_stored = num_draws * total_trees;
+
+  if (static_cast<int>(tree_start.size()) < n_stored) {
+    stop("`tree_start` is shorter than the stored chain implies.");
+  }
+
+  LogicalVector out(n_stored);
+
+  for (int k = 0; k < n_stored; k++) {
+    int pos = tree_start[k];
+    out[k] = tree_splits_on(forest_flat.data(), pos, numeric_wanted,
+                            categorical_wanted);
+  }
+
+  return out;
+}
+
+//' Evaluate stored forests at new data
+//'
+//' @param X a design matrix with entries in `[0, 1]`.
+//' @param forest_flat,tree_start the encoded forests returned by
+//'   `.bartisan_fit()`.
+//' @param bandwidth a matrix of per-tree bandwidths.
+//' @param num_forest,num_trees,num_draws `integer`; the dimensions of the
+//'   stored chain.
+//' @param soft `logical`; whether the decision rules are soft.
+//' @param gate `integer`; which gate the soft rules use; see `GateShape` in
+//'   `node.h`.
+//' @param iterations `integer`; the zero-based saved iterations to evaluate.
+//' @param codes a matrix of level codes for the categorical rules.
+//' @param tree_mask `logical`; one entry per stored tree, in the order
+//'   `.bartisan_tree_uses()` reports, saying whether to evaluate it. A
+//'   zero-length vector evaluates every tree, which is the ordinary case; a
+//'   subset is what partial dependence uses to avoid re-evaluating the trees
+//'   that cannot move across its grid.
+//' @returns A list of `num_forest` matrices of additive predictors.
+//' @noRd
+// [[Rcpp::export(.bartisan_predict)]]
+List bartisan_predict(const arma::mat& X, const std::vector<double>& forest_flat,
+                     const std::vector<int>& tree_start,
+                     const arma::mat& bandwidth, int num_forest,
+                     const std::vector<int>& num_trees,
+                     int num_draws, bool soft, int gate,
+                     const std::vector<int>& iterations,
+                     const arma::imat& codes,
+                     const std::vector<int>& tree_mask) {
+
+  int n = static_cast<int>(X.n_rows);
+  int num_iter = static_cast<int>(iterations.size());
+
+  if (static_cast<int>(num_trees.size()) != num_forest) {
+    stop("`num_trees` must have one value per forest.");
+  }
+
+  std::vector<int> tree_offset(num_forest + 1, 0);
+  for (int h = 0; h < num_forest; h++) {
+    tree_offset[h + 1] = tree_offset[h] + num_trees[h];
+  }
+  int total_trees = tree_offset[num_forest];
+
+  bool masked = !tree_mask.empty();
+
+  if (masked && static_cast<int>(tree_mask.size()) != num_draws * total_trees) {
+    stop("`tree_mask` must have one entry per stored tree.");
+  }
+
+  std::vector<arma::mat> out(num_forest, arma::mat(num_iter, n,
+                                                  arma::fill::zeros));
+
+  for (int s = 0; s < num_iter; s++) {
+    int iter = iterations[s];
+    if (iter < 0 || iter >= num_draws) {
+      stop("`iterations` must index the saved draws.");
+    }
+    for (int h = 0; h < num_forest; h++) {
+      for (int t = 0; t < num_trees[h]; t++) {
+        // Trees were written iteration-major, then forest, then tree, with the
+        // forests back to back rather than as a rectangle.
+        int flat_index = iter * total_trees + tree_offset[h] + t;
+
+        if (masked && !tree_mask[flat_index]) {
+          continue;
+        }
+
+        int begin = tree_start[flat_index];
+        double band = bandwidth(iter, tree_offset[h] + t);
+        for (int i = 0; i < n; i++) {
+          int pos = begin;
+          out[h](s, i) += eval_tree(forest_flat.data(), pos, X, codes, i, 1.0,
+                                    band,
+                                    soft, gate);
+        }
+      }
+    }
+    Rcpp::checkUserInterrupt();
+  }
+
+  List result(num_forest);
+  for (int h = 0; h < num_forest; h++) {
+    result[h] = wrap(out[h]);
+  }
+  return result;
+}
+
+//' Conditional log density of the outcome at stored posterior draws
+//'
+//' Evaluates the family's log density for each observation at each posterior
+//' draw of the additive predictors, using the nuisance parameters drawn at the
+//' same iteration. This is the likelihood contribution of an observation, so it
+//' is a density for a continuous response, a probability for a discrete one,
+//' and a survival probability for a censored survival time.
+//'
+//' @param y the outcome, coerced as the family expects.
+//' @param weights `numeric`; the prior weights.
+//' @param eta_draws a list of `H` matrices of draws by observations.
+//' @param family_name,link,family_opts the family specification.
+//' @param aux a matrix of draws by nuisance parameters, with zero columns when
+//'   the family has none.
+//' @returns A matrix of draws by observations.
+//' @noRd
+// [[Rcpp::export(.bartisan_logdens)]]
+arma::mat bartisan_logdens(const arma::vec& y, const arma::vec& weights,
+                          const List& eta_draws, std::string family_name,
+                          std::string link, List family_opts,
+                          const arma::mat& aux) {
+
+  // No varying-coefficient basis here. The caller combines the control function
+  // and the coefficients itself, because under a drawn coding the basis differs
+  // from draw to draw and a single matrix could not carry it. So what arrives is
+  // one predictor and the density is the plain family's.
+  std::unique_ptr<Family> family(make_family(family_name, link, y, weights,
+                                             family_opts, arma::mat()));
+
+  int H = family->H;
+  int n = static_cast<int>(y.n_elem);
+
+  if (static_cast<int>(eta_draws.size()) != H) {
+    stop("`eta_draws` must have one matrix per additive predictor (%d).", H);
+  }
+
+  std::vector<arma::mat> eta(H);
+  for (int h = 0; h < H; h++) {
+    eta[h] = as<arma::mat>(eta_draws[h]);
+    if (static_cast<int>(eta[h].n_cols) != n) {
+      stop("`eta_draws` and `y` disagree about the number of observations.");
+    }
+  }
+
+  int num_draws = static_cast<int>(eta[0].n_rows);
+  bool has_aux = aux.n_cols > 0;
+
+  if (has_aux && static_cast<int>(aux.n_rows) != num_draws) {
+    stop("`aux` must have one row per draw.");
+  }
+
+  arma::mat out(num_draws, n, arma::fill::zeros);
+  arma::mat draw(H, n);
+  arma::vec row(n);
+
+  for (int d = 0; d < num_draws; d++) {
+    if (has_aux) {
+      family->set_aux(aux.row(d).t());
+    }
+    for (int i = 0; i < n; i++) {
+      for (int h = 0; h < H; h++) {
+        draw(h, i) = eta[h](d, i);
+      }
+    }
+    family->logdens_all(draw, row.memptr());
+    out.row(d) = row.t();
+    Rcpp::checkUserInterrupt();
+  }
+
+  return out;
+}
+
+//' Category probabilities of a multinomial probit fit, by simulation
+//'
+//' The probability that the argmax of a correlated Gaussian vector falls in each
+//' category is an orthant probability with no closed form, so it is simulated.
+//' Fresh draws are taken on every call, which makes the estimate unbiased; the
+//' Monte Carlo error is then averaged down by the posterior draws, so a modest
+//' number of replicates per draw is enough for a posterior mean.
+//'
+//' @param eta_draws a list of one draws-by-observations matrix per latent
+//'   variable.
+//' @param sigma a matrix of draws by the lower triangle of the covariance
+//'   matrix, column-major within a row, as `aux` stores it.
+//' @param replicates `integer`; the number of simulation replicates per draw
+//'   and observation.
+//' @returns An array of draws by observations by categories.
+//' @noRd
+// [[Rcpp::export(.bartisan_mnp_probs)]]
+arma::cube bartisan_mnp_probs(const List& eta_draws, const arma::mat& sigma,
+                             int replicates) {
+
+  int C = static_cast<int>(eta_draws.size());
+
+  if (C < 1) {
+    stop("`eta_draws` must have at least one matrix.");
+  }
+
+  std::vector<arma::mat> eta(C);
+
+  for (int l = 0; l < C; l++) {
+    eta[l] = as<arma::mat>(eta_draws[l]);
+  }
+
+  int num_draws = static_cast<int>(eta[0].n_rows);
+  int n = static_cast<int>(eta[0].n_cols);
+
+  if (static_cast<int>(sigma.n_rows) != num_draws ||
+      static_cast<int>(sigma.n_cols) != C * (C + 1) / 2) {
+    stop("`sigma` must have one row per draw and one column per lower-triangle "
+         "entry.");
+  }
+
+  arma::cube out(num_draws, n, C + 1, arma::fill::zeros);
+  arma::mat covariance(C, C);
+  arma::mat factor(C, C);
+  arma::vec value(C);
+  arma::vec noise(C);
+
+  for (int d = 0; d < num_draws; d++) {
+    int at = 0;
+
+    for (int l = 0; l < C; l++) {
+      for (int k = 0; k <= l; k++) {
+        covariance(l, k) = sigma(d, at);
+        covariance(k, l) = sigma(d, at);
+        at++;
+      }
+    }
+
+    if (!arma::chol(factor, covariance, "lower")) {
+      factor = arma::eye<arma::mat>(C, C);
+    }
+
+    for (int i = 0; i < n; i++) {
+      for (int r = 0; r < replicates; r++) {
+        for (int l = 0; l < C; l++) {
+          noise(l) = norm_rand();
+        }
+
+        int best = -1;
+        double largest = 0.0;
+
+        for (int l = 0; l < C; l++) {
+          double shift = 0.0;
+
+          for (int k = 0; k <= l; k++) {
+            shift += factor(l, k) * noise(k);
+          }
+
+          value(l) = eta[l](d, i) + shift;
+
+          if (value(l) >= largest) {
+            largest = value(l);
+            best = l;
+          }
+        }
+
+        out(d, i, best + 1) += 1.0;
+      }
+    }
+
+    Rcpp::checkUserInterrupt();
+  }
+
+  out /= static_cast<double>(replicates);
+
+  return out;
+}
+
+//' The likelihood difference the bandwidth move uses, against two evaluations
+//'
+//' `Family::loglik_delta()` returns the change in the log likelihood when one
+//' additive predictor's row is replaced, in a single chunked pass, because the
+//' bandwidth move needs the difference and not the two values. Two separate
+//' calls to `total_loglik()` give the same number the obvious way. The eta-free
+//' terms and the normalizing constants are common to both predictors and cancel
+//' from the difference, so the two routes agree exactly or one of them is
+//' wrong. Exported for `test-invariants.R`; nothing in the package calls this.
+//'
+//' @param y,weights the response and the prior weights.
+//' @param eta an `H` by `N` matrix of additive predictors, as the engine holds
+//'   them.
+//' @param new_h `N` values to put in row `component`.
+//' @param family_name,link,family_opts,aux the family, as elsewhere.
+//' @param component which row of `eta` is replaced, zero-based.
+//' @returns A list with `delta`, the one-pass difference, and `two_pass`, the
+//'   difference of two full evaluations.
+//' @noRd
+// [[Rcpp::export(.bartisan_loglik_delta)]]
+List bartisan_loglik_delta(const arma::vec& y, const arma::vec& weights,
+                           const arma::mat& eta, const arma::vec& new_h,
+                           std::string family_name, std::string link,
+                           List family_opts, const arma::vec& aux,
+                           int component) {
+
+  std::unique_ptr<Family> family(make_family(family_name, link, y, weights,
+                                             family_opts));
+
+  if (static_cast<int>(eta.n_rows) != family->H ||
+      static_cast<int>(eta.n_cols) != static_cast<int>(y.n_elem)) {
+    stop("`eta` must be %d by %d.", family->H, static_cast<int>(y.n_elem));
+  }
+
+  if (new_h.n_elem != eta.n_cols) {
+    stop("`new_h` must have one value per observation.");
+  }
+
+  if (aux.n_elem > 0) {
+    family->set_aux(aux);
+  }
+
+  double delta = family->loglik_delta(eta, component, new_h.memptr());
+
+  arma::mat moved = eta;
+  moved.row(component) = new_h.t();
+
+  double two_pass = family->total_loglik(moved) - family->total_loglik(eta);
+
+  return List::create(_["delta"] = delta, _["two_pass"] = two_pass);
+}
+
+//' Score and information of a family, analytic or by differences
+//'
+//' Exists so that the test suite can check each family's analytic derivatives
+//' against central differences of its own log density.
+//'
+//' @param y,weights,eta_draws,family_name,link,family_opts,aux as for
+//'   `.bartisan_logdens()`.
+//' @param component `integer`; which additive predictor to differentiate with
+//'   respect to.
+//' @param by_difference `logical`; whether to use central differences rather
+//'   than the analytic form.
+//' @param blocked `logical`; whether to evaluate a whole draw at once through
+//'   the family's block methods rather than one observation at a time. Default
+//'   is `FALSE`. The two paths should agree; they differ for a family whose
+//'   per-observation route falls back on differences while its block route does
+//'   not.
+//' @returns A list with matrices `d1` and `info`, draws by observations.
+//' @noRd
+// [[Rcpp::export(.bartisan_derivs)]]
+List bartisan_derivs(const arma::vec& y, const arma::vec& weights,
+                    const List& eta_draws, std::string family_name,
+                    std::string link, List family_opts, const arma::mat& aux,
+                    int component, bool by_difference, bool blocked = false) {
+
+  std::unique_ptr<Family> family(make_family(family_name, link, y, weights,
+                                             family_opts));
+
+  int H = family->H;
+  int n = static_cast<int>(y.n_elem);
+
+  std::vector<arma::mat> eta(H);
+  for (int h = 0; h < H; h++) {
+    eta[h] = as<arma::mat>(eta_draws[h]);
+  }
+
+  int num_draws = static_cast<int>(eta[0].n_rows);
+  bool has_aux = aux.n_cols > 0;
+
+  arma::mat d1_out(num_draws, n, arma::fill::zeros);
+  arma::mat info_out(num_draws, n, arma::fill::zeros);
+  std::vector<double> column(H);
+
+  if (blocked) {
+    arma::mat draw(H, n);
+    arma::vec a(n);
+    arma::vec b(n);
+    std::vector<int> idx(n);
+
+    for (int i = 0; i < n; i++) {
+      idx[i] = i;
+    }
+
+    for (int d = 0; d < num_draws; d++) {
+      if (has_aux) {
+        family->set_aux(aux.row(d).t());
+      }
+      for (int i = 0; i < n; i++) {
+        for (int h = 0; h < H; h++) {
+          draw(h, i) = eta[h](d, i);
+        }
+      }
+      family->score_info_block(idx.data(), n, draw.memptr(), component,
+                               a.memptr(), b.memptr());
+      // The block methods apply the prior weight; strip it so that the result
+      // is comparable with the per-observation route.
+      d1_out.row(d) = (a / weights).t();
+      info_out.row(d) = (b / weights).t();
+    }
+
+    return List::create(_["d1"] = d1_out, _["info"] = info_out);
+  }
+
+  for (int d = 0; d < num_draws; d++) {
+    if (has_aux) {
+      family->set_aux(aux.row(d).t());
+    }
+    for (int i = 0; i < n; i++) {
+      for (int h = 0; h < H; h++) {
+        column[h] = eta[h](d, i);
+      }
+      double a;
+      double b;
+      if (by_difference) {
+        family->score_info_by_difference(i, column.data(), component, &a, &b);
+      }
+      else {
+        family->score_info(i, column.data(), component, &a, &b);
+        // score_info() applies the prior weight; the difference version does
+        // not, so strip it here to make the two comparable.
+        a /= weights(i);
+        b /= weights(i);
+      }
+      d1_out(d, i) = a;
+      info_out(d, i) = b;
+    }
+  }
+
+  return List::create(_["d1"] = d1_out, _["info"] = info_out);
+}

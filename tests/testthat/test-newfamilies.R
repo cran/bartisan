@@ -1,0 +1,198 @@
+test_that("the zero-inflated constructors resolve", {
+  expect_identical(as_bartisan_family(zi_poisson())[["family"]], "zip")
+  expect_identical(as_bartisan_family(zi_negbin())[["family"]], "zinb")
+  expect_identical(as_bartisan_family("zi_poisson")[["family"]], "zip")
+  expect_identical(as_bartisan_family(ordbeta())[["family"]], "ordbeta")
+
+  expect_error(zi_poisson("logit"), "should be")
+  expect_error(ordbeta("probit"), "should be")
+  expect_error(zi_negbin(theta = -1), "must be")
+  expect_error(ordbeta(phi = 0), "must be")
+})
+
+test_that("zero-inflated models carry a forest for each component", {
+  d <- sim_x(seed = 51)
+  n <- nrow(d)
+  structural <- stats::rbinom(n, 1, 0.3)
+  d$y <- ifelse(structural == 1, 0, stats::rpois(n, exp(1 + d$x1)))
+
+  fit <- bartisan(y ~ ., data = d, family = zi_poisson(),
+                  control = quick_control())
+
+  expect_identical(fit[["num_forest"]], 2L)
+  expect_identical(names(fit[["eta"]]), c("count", "zero"))
+  expect_null(fit[["aux"]])
+  expect_predictor_invariant(fit, d)
+
+  nb <- bartisan(y ~ ., data = d, family = zi_negbin(),
+                 control = quick_control())
+  expect_identical(colnames(nb[["aux"]]), "theta")
+  expect_true(all(nb[["aux"]][, "theta"] > 0))
+  expect_predictor_invariant(nb, d)
+})
+
+test_that("the zero-inflated mean sits below the count mean", {
+  skip_on_cran()
+
+  d <- sim_x(seed = 51)
+  n <- nrow(d)
+  structural <- stats::rbinom(n, 1, 0.3)
+  d$y <- ifelse(structural == 1, 0, stats::rpois(n, exp(1 + d$x1)))
+
+  fit <- bartisan(y ~ ., data = d, family = zi_poisson(),
+                  control = quick_control())
+
+  # The fitted mean is the count mean scaled down by the inflation probability,
+  # so it must sit below the count mean itself.
+  link <- predict(fit, type = "link")
+  expect_true(all(predict(fit, type = "response") < exp(link[, "count"]) + 1e-8))
+})
+
+# A dispersion given a value is held there in every draw. The negative binomial
+# is rewritten as a Poisson mixture by default, so it is also fitted directly,
+# which is the path that has its own early exit.
+test_that("a fixed dispersion is held fixed", {
+  skip_if_not_installed("patrick")
+
+  d <- sim_x(seed = 52)
+  d$y <- stats::rnbinom(nrow(d), mu = exp(1 + d$x1), size = 2)
+  d$claims <- ifelse(d$y == 0, 0, stats::rgamma(nrow(d), shape = d$y))
+
+  patrick::with_parameters_test_that(
+    "family:",
+    {
+      fit <- bartisan(stats::reformulate(c("x1", "x2", "x3"), response),
+                      data = d, family = family,
+                      control = quick_control(augment = augment))
+
+      for (nm in names(fixed)) {
+        expect_true(all(fit[["aux"]][, nm] == fixed[[nm]]), label = nm)
+      }
+    },
+    patrick::cases(
+      zi_negbin = list(family = zi_negbin(theta = 2.5), response = "y",
+                       augment = TRUE, fixed = c(theta = 2.5)),
+      `negbin, direct` = list(family = negbin(theta = 2.5), response = "y",
+                              augment = FALSE, fixed = c(theta = 2.5)),
+      tweedie = list(family = tweedie(power = 1.5, phi = 2),
+                     response = "claims", augment = TRUE,
+                     fixed = c(phi = 2, power = 1.5))
+    )
+  )
+})
+
+test_that("ordered beta fits a response with mass at both endpoints", {
+  d <- sim_x(seed = 53)
+  n <- nrow(d)
+  eta <- 2 * (d$x1 - 0.5)
+  p_one <- stats::plogis(eta - 1.5)
+  p_zero <- 1 - stats::plogis(eta + 1.5)
+  u <- stats::runif(n)
+  y <- stats::rbeta(n, stats::plogis(eta) * 8, (1 - stats::plogis(eta)) * 8)
+  y[u <= p_zero] <- 0
+  y[u >= 1 - p_one] <- 1
+  d$y <- y
+
+  fit <- bartisan(y ~ ., data = d, family = ordbeta(),
+                  control = quick_control())
+
+  expect_identical(fit[["num_forest"]], 1L)
+  expect_identical(colnames(fit[["aux"]]), c("cut1", "cut2", "phi"))
+  # Both cutpoints are drawn, and their order is enforced by construction.
+  expect_true(all(fit[["aux"]][, "cut1"] < fit[["aux"]][, "cut2"]))
+  expect_true(all(fit[["aux"]][, "phi"] > 0))
+  expect_predictor_invariant(fit, d)
+
+  # A `cut_alpha` other than one adds the induced-Dirichlet prior's power term
+  # to the cutpoint update, and the order still holds.
+  powered <- bartisan(y ~ ., data = d, family = ordbeta(cut_alpha = 2),
+                      control = quick_control())
+  expect_true(all(powered[["aux"]][, "cut1"] < powered[["aux"]][, "cut2"]))
+
+  # The fitted mean respects the bounds of the response.
+  fitted <- predict(fit, type = "response")
+  expect_true(all(fitted >= 0 & fitted <= 1))
+})
+
+test_that("ordered beta rejects responses it cannot model", {
+  d <- sim_x(seed = 54)
+  n <- nrow(d)
+
+  d$y <- stats::runif(n, -1, 1)
+  expect_error(bartisan(y ~ ., data = d, family = ordbeta(),
+                       control = quick_control()),
+               "between 0 and 1")
+
+  d$y <- stats::rbinom(n, 1, 0.5)
+  expect_error(bartisan(y ~ ., data = d, family = ordbeta(),
+                       control = quick_control()),
+               "needs some responses strictly")
+})
+
+test_that("zero-inflated recovery: both components are found", {
+  skip_on_cran()
+
+  set.seed(55)
+  n <- 600
+  X <- matrix(stats::runif(n * 4), nrow = n)
+  colnames(X) <- paste0("x", 1:4)
+  d <- as.data.frame(X)
+
+  log_mu <- 1 + 1.5 * (X[, 1] - 0.5)
+  p_zero <- stats::plogis(-0.5 + 2 * (X[, 2] - 0.5))
+  structural <- stats::rbinom(n, 1, p_zero)
+  d$y <- ifelse(structural == 1, 0, stats::rpois(n, exp(log_mu)))
+
+  fit <- bartisan(y ~ ., data = d, family = zi_poisson(),
+                  control = bartisan_control(num_trees = 20, num_burn = 400,
+                                             num_draws = 400, verbose = FALSE))
+
+  link <- predict(fit, type = "link")
+  expect_gt(stats::cor(link[, "count"], log_mu), 0.85)
+  expect_gt(stats::cor(link[, "zero"], stats::qlogis(p_zero)), 0.7)
+
+  # Each component's forest should lean on its own predictor. Ranked by the mean
+  # number of splits rather than by the table's own order, which sorts by
+  # `prop_used`: under the default splitting prior every predictor is used in
+  # nearly every draw, so the first row of that table is a tie and says nothing.
+  usage <- summary(fit)[["usage"]]
+  top <- function(u) rownames(u)[which.max(u[, "mean"])]
+  expect_identical(top(usage[["count"]]), "x1")
+  expect_identical(top(usage[["zero"]]), "x2")
+})
+
+test_that("ordered beta recovery: cutpoints and precision are found", {
+  skip_on_cran()
+
+  set.seed(56)
+  n <- 600
+  X <- matrix(stats::runif(n * 4), nrow = n)
+  colnames(X) <- paste0("x", 1:4)
+  d <- as.data.frame(X)
+
+  eta <- 2 * (X[, 1] - 0.5) + 1.5 * (X[, 2] - 0.5)
+  cut1 <- -1.5
+  cut2 <- 1.5
+  phi <- 8
+  mu <- stats::plogis(eta)
+
+  p_one <- stats::plogis(eta - cut2)
+  p_zero <- 1 - stats::plogis(eta - cut1)
+  u <- stats::runif(n)
+  y <- stats::rbeta(n, mu * phi, (1 - mu) * phi)
+  y[u <= p_zero] <- 0
+  y[u >= 1 - p_one] <- 1
+  d$y <- y
+
+  fit <- bartisan(y ~ ., data = d, family = ordbeta(),
+                  control = bartisan_control(num_trees = 20, num_burn = 400,
+                                             num_draws = 400, verbose = FALSE))
+
+  expect_gt(stats::cor(predict(fit, type = "link"), eta), 0.9)
+  expect_equal(mean(fit[["aux"]][, "cut1"]), cut1, tolerance = 0.35)
+  expect_equal(mean(fit[["aux"]][, "cut2"]), cut2, tolerance = 0.35)
+  expect_equal(mean(fit[["aux"]][, "phi"]), phi, tolerance = 0.35)
+
+  # The endpoint masses are reproduced.
+  expect_equal(mean(predict(fit, type = "response")), mean(y), tolerance = 0.05)
+})
